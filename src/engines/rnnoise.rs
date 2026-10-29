@@ -173,4 +173,59 @@ mod tests {
         engine.process(&input, &mut output).unwrap();
         assert!(output.iter().all(|sample| *sample == 0.0));
     }
+
+    fn render_with_tail(input: &[f32], chunk_size: usize, tail_chunk_size: usize) -> Vec<f32> {
+        let mut engine = RnnoiseEngine::new();
+        let mut rendered = vec![0.0; input.len()];
+        let mut offset = 0;
+        while offset < input.len() {
+            let end = (offset + chunk_size).min(input.len());
+            engine.process(&input[offset..end], &mut rendered[offset..end]).unwrap();
+            offset = end;
+        }
+        let mut tail = Vec::new();
+        loop {
+            let mut buf = vec![0.0; tail_chunk_size];
+            let count = engine.flush(&mut buf).unwrap();
+            tail.extend_from_slice(&buf[..count]);
+            if count == 0 {
+                break;
+            }
+        }
+        assert_eq!(tail.len(), engine.latency_samples());
+        rendered.extend(tail);
+        rendered
+    }
+
+    #[test]
+    fn flush_preserves_final_partial_frame_and_is_chunk_invariant() {
+        for input_len in [1, 100, 479, 480, 481, 959, 960, 961, 4097] {
+            let input: Vec<f32> = (0..input_len)
+                .map(|i| (i as f32 * 0.031).sin() * 0.2)
+                .collect();
+            let reference = render_with_tail(&input, input_len.max(1), FRAME_SIZE);
+            for chunk in [1, 37, 127, 480, 1024] {
+                let actual = render_with_tail(&input, chunk, 73);
+                assert_eq!(reference.len(), actual.len(), "length mismatch for input {input_len}");
+                for (i, (a, b)) in reference.iter().zip(&actual).enumerate() {
+                    assert!((a - b).abs() <= 1e-6,
+                        "flush output mismatch at {i}, input {input_len}, chunk {chunk}: {a} vs {b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flush_requires_reset_before_more_input_and_reset_reopens_stream() {
+        let mut engine = RnnoiseEngine::new();
+        let input = vec![0.1; 100];
+        let mut output = vec![0.0; input.len()];
+        engine.process(&input, &mut output).unwrap();
+        let mut tail = vec![0.0; 31];
+        assert_eq!(engine.flush(&mut tail).unwrap(), 31);
+        assert!(engine.process(&input, &mut output).is_err());
+        engine.reset();
+        engine.process(&input, &mut output).unwrap();
+    }
+
 }
