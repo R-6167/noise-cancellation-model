@@ -3,8 +3,9 @@
 //! Usage:
 //! cargo run --release --features cli --example quality_benchmark -- clean.wav noisy.wav [model_dir]
 //!
-//! Inputs must be aligned mono/first-channel WAVs at 48 kHz. The benchmark removes
-//! the engine's reported startup latency after flushing its final tail.
+//! Inputs must be aligned mono/first-channel WAVs at 48 kHz. Reported SNR is
+//! calculated both at zero lag and with a bounded diagnostic lag search; the latter
+//! is diagnostic only and must not hide alignment or latency bugs.
 
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use noise_cancellation::{
@@ -123,6 +124,50 @@ fn snr_db(clean: &[f32], estimate: &[f32]) -> Option<f64> {
     Some(10.0 * (signal_power / error_power).log10())
 }
 
+/// Find the best SNR over a bounded relative offset. Positive lag means the estimate
+/// starts later than the clean reference; negative lag means it starts earlier.
+/// This is a diagnostic only: callers should always report the zero-lag score too.
+fn best_lag_snr_db(clean: &[f32], estimate: &[f32], max_lag: usize) -> Option<(f64, isize)> {
+    if clean.is_empty() || estimate.is_empty() {
+        return None;
+    }
+    let bound = max_lag.min(clean.len().saturating_sub(1)).min(estimate.len().saturating_sub(1));
+    let mut best: Option<(f64, isize)> = None;
+    for lag in -(bound as isize)..=(bound as isize) {
+        let (clean_start, estimate_start, length) = if lag >= 0 {
+            let offset = lag as usize;
+            (0, offset, clean.len().min(estimate.len().saturating_sub(offset)))
+        } else {
+            let offset = (-lag) as usize;
+            (offset, 0, clean.len().saturating_sub(offset).min(estimate.len()))
+        };
+        if length < 2 {
+            continue;
+        }
+        if let Some(score) = snr_db(
+            &clean[clean_start..clean_start + length],
+            &estimate[estimate_start..estimate_start + length],
+        ) {
+            if best.map_or(true, |(best_score, _)| score > best_score) {
+                best = Some((score, lag));
+            }
+        }
+    }
+    best
+}
+
+fn print_snr_diagnostics(label: &str, clean: &[f32], estimate: &[f32], input_snr: f64) -> Result<(), Box<dyn Error>> {
+    let zero_lag = snr_db(clean, estimate).ok_or(format!("cannot calculate {label} zero-lag SNR"))?;
+    let (best_snr, lag) = best_lag_snr_db(clean, estimate, SAMPLE_RATE as usize / 10)
+        .ok_or(format!("cannot calculate {label} lag-adjusted SNR"))?;
+    println!(
+        "{label}: {zero_lag:.2} dB zero-lag SNR ({:+.2} dB vs noisy input); best bounded diagnostic SNR {best_snr:.2} dB at lag {lag} samples ({:.2} ms)",
+        zero_lag - input_snr,
+        lag as f64 * 1000.0 / SAMPLE_RATE as f64
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 || args.len() > 5 {
@@ -152,41 +197,41 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Strength: 0.85, wet/dry mix disabled, sample rate: {SAMPLE_RATE} Hz");
 
     let rnnoise = process_full_stream(EngineKind::Rnnoise, &noisy)?;
-    let rn_snr = snr_db(&clean, &rnnoise).ok_or("cannot calculate RNNoise SNR")?;
-    println!("RNNoise: {rn_snr:.2} dB SNR ({:+.2} dB vs noisy input)", rn_snr - input_snr);
+    print_snr_diagnostics("RNNoise", &clean, &rnnoise, input_snr)?;
 
     let deepfilter = process_full_stream(
         EngineKind::DeepFilterNet { model_dir: model_dir.clone() },
         &noisy,
     )?;
-    let df_snr = snr_db(&clean, &deepfilter).ok_or("cannot calculate DeepFilterNet SNR")?;
-    println!(
-        "DeepFilterNet3: {df_snr:.2} dB SNR ({:+.2} dB vs noisy input)",
-        df_snr - input_snr
-    );
+    print_snr_diagnostics("DeepFilterNet3", &clean, &deepfilter, input_snr)?;
     println!("These scores apply only to this aligned reference pair; listen for speech artifacts as well.");
 
     if let Some(output_dir) = args.get(4) {
         let output_dir = PathBuf::from(output_dir);
         std::fs::create_dir_all(&output_dir)?;
+        let noisy_path = output_dir.join("noisy_input.wav");
         let rn_path = output_dir.join("rnnoise.wav");
         let df_path = output_dir.join("deepfilternet.wav");
-        if rn_path.exists() || df_path.exists() {
+        if noisy_path.exists() || rn_path.exists() || df_path.exists() {
             return Err(format!(
                 "refusing to overwrite existing benchmark outputs in {}",
                 output_dir.display()
             ).into());
         }
+        write_mono_wav(&noisy_path, &noisy)?;
         write_mono_wav(&rn_path, &rnnoise)?;
         write_mono_wav(&df_path, &deepfilter)?;
-        println!("Wrote listening outputs: {} and {}", rn_path.display(), df_path.display());
+        println!(
+            "Wrote listening outputs: {}, {}, and {}",
+            noisy_path.display(), rn_path.display(), df_path.display()
+        );
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::snr_db;
+    use super::{best_lag_snr_db, snr_db};
 
     #[test]
     fn snr_metric_rewards_an_exact_clean_signal() {
@@ -194,6 +239,22 @@ mod tests {
         let noisy = [0.3f32, -0.2, 0.3, 0.5];
         assert!(snr_db(&clean, &clean).unwrap().is_infinite());
         assert!(snr_db(&clean, &clean).unwrap() > snr_db(&clean, &noisy).unwrap());
+    }
+
+    #[test]
+    fn bounded_lag_search_recovers_a_known_offset() {
+        let clean = [0.1f32, 0.4, -0.2, 0.7, 0.3, -0.5, 0.2];
+        let mut delayed = vec![0.0f32];
+        delayed.extend_from_slice(&clean[..clean.len() - 1]);
+        let (score, lag) = best_lag_snr_db(&clean, &delayed, 2).unwrap();
+        assert_eq!(lag, 1);
+        assert!(score.is_infinite());
+    }
+
+    #[test]
+    fn bounded_lag_search_rejects_empty_inputs() {
+        assert!(best_lag_snr_db(&[], &[1.0], 3).is_none());
+        assert!(best_lag_snr_db(&[1.0], &[], 3).is_none());
     }
 
     #[test]
