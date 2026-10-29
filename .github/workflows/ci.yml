@@ -29,6 +29,8 @@ jobs:
         run: cargo build --release
       - name: Build with CLI + c-api
         run: cargo build --release --features "cli,c-api"
+      - name: Offline CLI tests
+        run: cargo test --release --features cli --bin noise-cancel
       - name: Build RNNoise-only (no default features)
         run: cargo build --release --no-default-features --features rnnoise
       - name: Tests (RNNoise)
