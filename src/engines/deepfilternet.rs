@@ -273,6 +273,29 @@ impl DfHistory {
     }
 }
 
+fn model_pipeline_ready(combined: bool, encoder: bool, erb_decoder: bool, df_decoder: bool) -> bool {
+    combined || (encoder && erb_decoder && df_decoder)
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::model_pipeline_ready;
+
+    #[test]
+    fn combined_model_is_a_complete_pipeline() {
+        assert!(model_pipeline_ready(true, false, false, false));
+    }
+
+    #[test]
+    fn split_model_requires_encoder_and_both_decoders() {
+        assert!(model_pipeline_ready(false, true, true, true));
+        assert!(!model_pipeline_ready(false, true, false, true));
+        assert!(!model_pipeline_ready(false, true, true, false));
+        assert!(!model_pipeline_ready(false, true, false, false));
+        assert!(!model_pipeline_ready(false, false, true, true));
+    }
+}
+
 struct OnnxModels {
     ready: bool,
     combined: Option<ort::session::Session>,
@@ -350,7 +373,7 @@ impl OnnxModels {
         }
 
         Ok(Self {
-            ready: combined.is_some() || enc.is_some(),
+            ready: model_pipeline_ready(combined.is_some(), enc.is_some(), erb_dec.is_some(), df_dec.is_some()),
             combined,
             enc,
             erb_dec,
@@ -491,18 +514,29 @@ impl DeepFilterNetEngine {
             ];
             if let Ok(outputs) = session.run(inputs) {
                 let mut mask = [1.0f32; NB_ERB];
+                let mut mask_ok = false;
                 let mut df_coefs = Vec::new();
                 if let Some(v) = outputs.get("erb_mask").or_else(|| outputs.get("m")) {
                     if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
-                        for (i, &x) in data.iter().take(NB_ERB).enumerate() {
-                            mask[i] = x.clamp(0.0, 1.0);
+                        if data.len() >= NB_ERB {
+                            for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                                if !x.is_finite() { return false; }
+                                mask[i] = x.clamp(0.0, 1.0);
+                            }
+                            mask_ok = true;
                         }
                     }
                 }
                 if let Some(v) = outputs.get("df_coefs").or_else(|| outputs.get("coefs")) {
                     if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
-                        df_coefs.extend_from_slice(data);
+                        if data.iter().all(|x| x.is_finite()) {
+                            df_coefs.extend_from_slice(data);
+                        }
                     }
+                }
+                if !mask_ok && df_coefs.is_empty() {
+                    log::warn!("DeepFilterNet combined model returned no usable outputs");
+                    return false;
                 }
                 self.mask = mask;
                 self.df_coefs = df_coefs;
@@ -521,43 +555,63 @@ impl DeepFilterNetEngine {
             return false;
         };
 
-        if let Some(ref mut erb_dec) = self.onnx.erb_dec {
-            let mut dec_in = Vec::new();
-            for n in ["emb", "e3", "e2", "e1", "e0"] {
-                if let Some(v) = enc_out.get(n) {
-                    dec_in.push((n.to_string(), v));
-                }
+        let Some(ref mut erb_dec) = self.onnx.erb_dec else {
+            return false;
+        };
+        let Some(ref mut df_dec) = self.onnx.df_dec else {
+            return false;
+        };
+
+        let mut erb_inputs = Vec::new();
+        for n in ["emb", "e3", "e2", "e1", "e0"] {
+            if let Some(v) = enc_out.get(n) {
+                erb_inputs.push((n.to_string(), v));
             }
-            if !dec_in.is_empty() {
-                if let Ok(out) = erb_dec.run(dec_in) {
-                    if let Some((_, v)) = out.iter().next() {
-                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
-                            for (i, &x) in data.iter().take(NB_ERB).enumerate() {
-                                self.mask[i] = x.clamp(0.0, 1.0);
-                            }
-                        }
-                    }
-                }
-            }
+        }
+        if erb_inputs.is_empty() {
+            return false;
+        }
+        let Ok(erb_out) = erb_dec.run(erb_inputs) else {
+            return false;
+        };
+        let Some((_, erb_value)) = erb_out.iter().next() else {
+            return false;
+        };
+        let Ok((_, erb_data)) = erb_value.try_extract_tensor::<f32>() else {
+            return false;
+        };
+        if erb_data.len() < NB_ERB || erb_data.iter().any(|x| !x.is_finite()) {
+            return false;
+        }
+        let mut mask = [1.0f32; NB_ERB];
+        for (i, &x) in erb_data.iter().take(NB_ERB).enumerate() {
+            mask[i] = x.clamp(0.0, 1.0);
         }
 
-        if let Some(ref mut df_dec) = self.onnx.df_dec {
-            let mut dec_in = Vec::new();
-            for n in ["emb", "c0"] {
-                if let Some(v) = enc_out.get(n) {
-                    dec_in.push((n.to_string(), v));
-                }
-            }
-            if !dec_in.is_empty() {
-                if let Ok(out) = df_dec.run(dec_in) {
-                    if let Some((_, v)) = out.iter().next() {
-                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
-                            self.df_coefs.extend_from_slice(data);
-                        }
-                    }
-                }
+        let mut df_inputs = Vec::new();
+        for n in ["emb", "c0"] {
+            if let Some(v) = enc_out.get(n) {
+                df_inputs.push((n.to_string(), v));
             }
         }
+        if df_inputs.is_empty() {
+            return false;
+        }
+        let Ok(df_out) = df_dec.run(df_inputs) else {
+            return false;
+        };
+        let Some((_, df_value)) = df_out.iter().next() else {
+            return false;
+        };
+        let Ok((_, df_data)) = df_value.try_extract_tensor::<f32>() else {
+            return false;
+        };
+        if df_data.is_empty() || df_data.iter().any(|x| !x.is_finite()) {
+            return false;
+        }
+
+        self.mask = mask;
+        self.df_coefs.extend_from_slice(df_data);
         true
     }
 }
