@@ -94,7 +94,7 @@ impl MultiDenoiser {
     /// Output length must be divisible by the channel count; returns frames written.
     pub fn flush_interleaved(&mut self, output: &mut [f32]) -> Result<usize> {
         let channels = self.chans.len();
-        if output.len() % channels != 0 {
+        if !output.len().is_multiple_of(channels) {
             return Err(Error::InvalidConfig(
                 "interleaved flush output length must be divisible by channel count".into(),
             ));
