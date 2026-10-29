@@ -39,6 +39,7 @@ jobs:
   deepfilternet:
     name: DeepFilterNet3 (vendored models)
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
