@@ -209,9 +209,9 @@ impl Denoiser {
 
         self.up.as_mut().unwrap().process(input, &mut self.engine_in);
         let strength = self.config.strength.clamp().0;
-        self.dry_queue.extend(input.iter().copied());
 
         if self.engine_in.is_empty() {
+            self.dry_queue.extend(input.iter().copied());
             for sample in output.iter_mut() {
                 let dry = self.dry_queue.pop_front().unwrap_or(0.0);
                 *sample = if self.config.wet_dry_mix {
@@ -232,6 +232,7 @@ impl Denoiser {
             &mut self.engine_out[..self.engine_in.len()],
         )?;
 
+        self.dry_queue.extend(input.iter().copied());
         let down = self.down.as_mut().unwrap();
         let mut wet_host = std::mem::take(&mut self.wet_buf);
         down.process(&self.engine_out[..self.engine_in.len()], &mut wet_host);
