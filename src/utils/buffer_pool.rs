@@ -1,20 +1,24 @@
 //! Safe audio buffer pool for reusable processing buffers.
 //!
-//! The pool uses a mutex-protected free list so checked-out buffers can
-//! coexist without borrowing the pool mutably. A checked-out buffer holds a
-//! shared borrow of its pool, preventing the pool from being dropped first.
-//! The mutex is not lock-free; sharing a pool across latency-sensitive threads
-//! should be considered carefully.
+//! Checked-out buffers own an Arc to the pool's inner state. This keeps the
+//! return target alive without raw pointers or borrowing the engine while it
+//! processes a frame. The free list is mutex-protected, not lock-free.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-pub struct PooledBuffer<'a> {
-    data: Vec<f32>,
-    pool: &'a AudioBufferPool,
+struct PoolInner {
+    free: Mutex<VecDeque<Vec<f32>>>,
+    max_buffers: usize,
+    default_capacity: usize,
 }
 
-impl PooledBuffer<'_> {
+pub struct PooledBuffer {
+    data: Vec<f32>,
+    pool: Option<Arc<PoolInner>>,
+}
+
+impl PooledBuffer {
     #[inline]
     pub fn as_mut_slice(&mut self) -> &mut [f32] { &mut self.data }
     #[inline]
@@ -36,27 +40,29 @@ impl PooledBuffer<'_> {
     }
 
     /// Consume the buffer without returning its vector to the pool.
-    pub fn into_vec(self) -> Vec<f32> {
-        let mut this = std::mem::ManuallyDrop::new(self);
-        std::mem::take(&mut this.data)
+    pub fn into_vec(mut self) -> Vec<f32> {
+        self.pool.take();
+        std::mem::take(&mut self.data)
     }
 }
 
-impl Drop for PooledBuffer<'_> {
-    fn drop(&mut self) { self.pool.give_back(std::mem::take(&mut self.data)); }
+impl Drop for PooledBuffer {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.take() {
+            give_back(&pool, std::mem::take(&mut self.data));
+        }
+    }
 }
-impl std::ops::Deref for PooledBuffer<'_> {
+impl std::ops::Deref for PooledBuffer {
     type Target = [f32];
     fn deref(&self) -> &Self::Target { &self.data }
 }
-impl std::ops::DerefMut for PooledBuffer<'_> {
+impl std::ops::DerefMut for PooledBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target { &mut self.data }
 }
 
 pub struct AudioBufferPool {
-    free: Mutex<VecDeque<Vec<f32>>>,
-    max_buffers: usize,
-    default_capacity: usize,
+    inner: Arc<PoolInner>,
 }
 
 impl AudioBufferPool {
@@ -66,44 +72,46 @@ impl AudioBufferPool {
             free.push_back(Vec::with_capacity(default_capacity));
         }
         Self {
-            free: Mutex::new(free),
-            max_buffers: max_buffers.max(1),
-            default_capacity,
+            inner: Arc::new(PoolInner {
+                free: Mutex::new(free),
+                max_buffers: max_buffers.max(1),
+                default_capacity,
+            }),
         }
     }
 
     pub fn for_streaming() -> Self { Self::new(8, 2048) }
 
-    pub fn acquire(&self, min_capacity: usize) -> PooledBuffer<'_> {
-        let mut data = self.free
+    pub fn acquire(&self, min_capacity: usize) -> PooledBuffer {
+        let mut data = self.inner.free
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front()
-            .unwrap_or_else(|| Vec::with_capacity(min_capacity.max(self.default_capacity)));
+            .unwrap_or_else(|| Vec::with_capacity(min_capacity.max(self.inner.default_capacity)));
 
         if data.capacity() < min_capacity {
             data.reserve_exact(min_capacity);
         }
         data.clear();
-        PooledBuffer { data, pool: self }
-    }
-
-    fn give_back(&self, mut buf: Vec<f32>) {
-        let mut free = self.free.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if free.len() >= self.max_buffers { return; }
-        buf.clear();
-        if buf.capacity() > self.default_capacity.saturating_mul(8) {
-            buf.shrink_to(self.default_capacity);
-        }
-        free.push_back(buf);
+        PooledBuffer { data, pool: Some(Arc::clone(&self.inner)) }
     }
 
     pub fn available(&self) -> usize {
-        self.free.lock()
+        self.inner.free.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
+}
+
+fn give_back(pool: &PoolInner, mut buf: Vec<f32>) {
+    let mut free = pool.free.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if free.len() >= pool.max_buffers { return; }
+    buf.clear();
+    if buf.capacity() > pool.default_capacity.saturating_mul(8) {
+        buf.shrink_to(pool.default_capacity);
+    }
+    free.push_back(buf);
 }
 
 #[cfg(test)]
@@ -147,5 +155,14 @@ mod tests {
         let buffer = pool.acquire(8);
         let _owned = buffer.into_vec();
         assert_eq!(pool.available(), initial);
+    }
+
+    #[test]
+    fn buffer_remains_safe_after_pool_handle_is_dropped() {
+        let buffer = {
+            let pool = AudioBufferPool::new(1, 16);
+            pool.acquire(8)
+        };
+        drop(buffer);
     }
 }
