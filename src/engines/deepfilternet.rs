@@ -4,6 +4,8 @@
 //! order-5 deep-filter FIR with spectrum history.
 
 #![cfg(feature = "deepfilternet")]
+// DSP code uses explicit index loops over fixed-size arrays (ERB/FFT bins).
+#![allow(clippy::needless_range_loop)]
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -34,11 +36,7 @@ const NORM_ALPHA: f32 = 0.99;
 fn global_ort_env() -> &'static ort::environment::Environment {
     use std::sync::OnceLock;
     static ENV: OnceLock<ort::environment::Environment> = OnceLock::new();
-    ENV.get_or_init(|| {
-        ort::init()
-            .build()
-            .expect("ort Environment init")
-    })
+    ENV.get_or_init(|| ort::init().build().expect("ort Environment init"))
 }
 
 #[derive(Debug, Clone)]
@@ -470,10 +468,8 @@ impl DeepFilterNetEngine {
                 Err(_) => return false,
             };
         let mut spec_ch = vec![0.0f32; 2 * NB_DF];
-        for k in 0..NB_DF {
-            spec_ch[k] = self.spec_re[k];
-            spec_ch[NB_DF + k] = self.spec_im[k];
-        }
+        spec_ch[..NB_DF].copy_from_slice(&self.spec_re);
+        spec_ch[NB_DF..].copy_from_slice(&self.spec_im);
         let spec_array = match ndarray::Array4::from_shape_vec((1, 2, 1, NB_DF), spec_ch) {
             Ok(a) => a,
             Err(_) => return false,
@@ -488,34 +484,26 @@ impl DeepFilterNetEngine {
             Err(_) => return false,
         };
 
-        if self.onnx.combined.is_some() {
+        if let Some(ref mut session) = self.onnx.combined {
             let inputs: Vec<(String, ort::session::SessionInputValue)> = vec![
                 ("feat_erb".to_string(), erb_t.clone().into()),
                 ("feat_spec".to_string(), spec_t.clone().into()),
             ];
-            let extracted = {
-                let session = self.onnx.combined.as_mut().unwrap();
-                if let Ok(outputs) = session.run(inputs) {
-                    let mut mask = [1.0f32; NB_ERB];
-                    let mut df_coefs = Vec::new();
-                    if let Some(v) = outputs.get("erb_mask").or_else(|| outputs.get("m")) {
-                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
-                            for (i, &x) in data.iter().take(NB_ERB).enumerate() {
-                                mask[i] = x.clamp(0.0, 1.0);
-                            }
+            if let Ok(outputs) = session.run(inputs) {
+                let mut mask = [1.0f32; NB_ERB];
+                let mut df_coefs = Vec::new();
+                if let Some(v) = outputs.get("erb_mask").or_else(|| outputs.get("m")) {
+                    if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                        for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                            mask[i] = x.clamp(0.0, 1.0);
                         }
                     }
-                    if let Some(v) = outputs.get("df_coefs").or_else(|| outputs.get("coefs")) {
-                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
-                            df_coefs.extend_from_slice(data);
-                        }
-                    }
-                    Some((mask, df_coefs))
-                } else {
-                    None
                 }
-            };
-            if let Some((mask, df_coefs)) = extracted {
+                if let Some(v) = outputs.get("df_coefs").or_else(|| outputs.get("coefs")) {
+                    if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                        df_coefs.extend_from_slice(data);
+                    }
+                }
                 self.mask = mask;
                 self.df_coefs = df_coefs;
                 return true;

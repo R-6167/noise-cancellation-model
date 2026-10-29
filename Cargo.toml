@@ -11,7 +11,7 @@ readme = "README.md"
 include = ["src/**/*", "include/**/*", "models/**/*", "examples/**/*", "tests/**/*", "scripts/**/*", "Cargo.toml", "README.md", "LICENSE*"]
 
 [features]
-default = ["rnnoise"]
+default = ["rnnoise", "deepfilternet"]
 rnnoise = ["dep:nnnoiseless"]
 deepfilternet = ["dep:ort", "dep:ndarray", "dep:realfft", "dep:rustfft"]
 c-api = []
