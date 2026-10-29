@@ -41,3 +41,25 @@ fn reset_is_safe() {
     let mut output = vec![0.0f32; FRAME_SIZE];
     den.process(&input, &mut output).unwrap();
 }
+
+
+#[test]
+fn wet_dry_mix_keeps_dry_signal_aligned_to_reported_latency() {
+    let mut den = Denoiser::new(DenoiserConfig {
+        strength: Strength(0.0),
+        wet_dry_mix: true,
+        ..Default::default()
+    }).unwrap();
+    let latency = den.latency_samples();
+    let input: Vec<f32> = (0..FRAME_SIZE * 6)
+        .map(|i| ((i * 13 % 97) as f32) / 100.0)
+        .collect();
+    let mut output = vec![0.0; input.len()];
+    den.process(&input, &mut output).unwrap();
+
+    assert!(output[..latency].iter().all(|sample| sample.abs() < 1e-7));
+    for i in latency..output.len() {
+        assert!((output[i] - input[i - latency]).abs() < 1e-7,
+            "dry signal misaligned at {i}: {} vs {}", output[i], input[i - latency]);
+    }
+}
