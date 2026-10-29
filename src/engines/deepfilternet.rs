@@ -1,8 +1,10 @@
-//! DeepFilterNet3 engine – STFT + ONNX encoder inference.
+//! DeepFilterNet3 engine – full neural path (encoder + ERB/DF decoders).
 //!
-//! Loads enc / erb_dec / df_dec (or combined) via ort, keeps sessions alive,
-//! builds feat_erb + feat_spec from the STFT, and runs the encoder each hop.
-//! Falls back to spectral suppression when neural path is unavailable.
+//! Pipeline per hop:
+//!   STFT → feat_erb / feat_spec → encoder → erb_dec + df_dec
+//!        → apply ERB mask + deep-filter coefficients → iSTFT
+//!
+//! Falls back to spectral suppression when any stage is unavailable.
 
 #![cfg(feature = "deepfilternet")]
 
@@ -19,7 +21,7 @@ use crate::{Error, Result};
 
 pub const HOP_SIZE: usize = 480;
 pub const FFT_SIZE: usize = 960;
-pub const N_FREQS: usize = FFT_SIZE / 2 + 1; // 481
+pub const N_FREQS: usize = FFT_SIZE / 2 + 1;
 pub const NB_ERB: usize = 32;
 pub const NB_DF: usize = 96;
 pub const DF_ORDER: usize = 5;
@@ -123,7 +125,7 @@ impl Stft {
     }
 }
 
-// ─── ERB / spectral features ────────────────────────────────────────────
+// ─── Feature extraction ───────────────────────────────────────────────────
 
 fn compute_erb_features(spectrum: &[Complex<f32>]) -> [f32; NB_ERB] {
     let mut erb = [0.0f32; NB_ERB];
@@ -142,14 +144,41 @@ fn compute_erb_features(spectrum: &[Complex<f32>]) -> [f32; NB_ERB] {
     erb
 }
 
-fn compute_spec_features(spectrum: &[Complex<f32>]) -> ([f32; NB_DF], [f32; NB_DF]) {
-    let mut re = [0.0f32; NB_DF];
-    let mut im = [0.0f32; NB_DF];
-    for k in 0..NB_DF.min(spectrum.len()) {
-        re[k] = spectrum[k].re;
-        im[k] = spectrum[k].im;
+// ─── Apply ERB mask ─────────────────────────────────────────────────────
+
+fn apply_erb_mask(spectrum: &mut [Complex<f32>], mask: &[f32], strength: f32) {
+    if mask.len() < NB_ERB {
+        return;
     }
-    (re, im)
+    let n = spectrum.len().min(N_FREQS);
+    let max_bin = NB_DF.min(n);
+
+    for k in 0..n {
+        let band_f = k as f32 / max_bin.max(1) as f32 * (NB_ERB - 1) as f32;
+        let b0 = (band_f.floor() as usize).min(NB_ERB - 1);
+        let b1 = (b0 + 1).min(NB_ERB - 1);
+        let frac = band_f - b0 as f32;
+
+        let m = mask[b0] * (1.0 - frac) + mask[b1] * frac;
+        let gain = 1.0 - strength + strength * m.clamp(0.0, 1.0);
+        spectrum[k] *= gain;
+    }
+}
+
+// ─── Apply deep-filter coefficients ──────────────────────────────────────
+
+fn apply_deep_filter(spectrum: &mut [Complex<f32>], coefs: &[f32], strength: f32) {
+    if coefs.is_empty() {
+        return;
+    }
+    let n = NB_DF.min(spectrum.len()).min(coefs.len() / 2);
+    for k in 0..n {
+        let re = coefs[k * 2];
+        let im = coefs.get(k * 2 + 1).copied().unwrap_or(0.0);
+        let g = Complex::new(re, im).norm().clamp(0.0, 2.0);
+        let gain = 1.0 - strength + strength * g.min(1.0);
+        spectrum[k] *= gain;
+    }
 }
 
 // ─── ONNX models ─────────────────────────────────────────────────────────
@@ -157,6 +186,8 @@ fn compute_spec_features(spectrum: &[Complex<f32>]) -> ([f32; NB_DF], [f32; NB_D
 struct OnnxModels {
     ready: bool,
     enc: Option<ort::session::Session>,
+    erb_dec: Option<ort::session::Session>,
+    df_dec: Option<ort::session::Session>,
     loaded_paths: Vec<PathBuf>,
 }
 
@@ -187,128 +218,185 @@ impl OnnxModels {
                 return Ok(Self {
                     ready: false,
                     enc: None,
+                    erb_dec: None,
+                    df_dec: None,
                     loaded_paths: vec![],
                 });
             }
         };
 
         let mut loaded = Vec::new();
-        let mut enc_session = None;
 
-        let enc_candidate = if enc_path.exists() {
-            Some(enc_path)
-        } else if combined.exists() {
-            Some(combined)
-        } else if combined2.exists() {
-            Some(combined2)
-        } else {
-            None
-        };
-
-        if let Some(path) = enc_candidate {
-            match ort::session::Session::builder(&env).and_then(|b| b.commit_from_file(&path)) {
+        let load = |path: &Path| -> Option<ort::session::Session> {
+            match ort::session::Session::builder(&env).and_then(|b| b.commit_from_file(path)) {
                 Ok(session) => {
-                    log::info!("Encoder session loaded: {}", path.display());
-                    for (i, input) in session.inputs.iter().enumerate() {
-                        log::debug!("  enc input[{}]: {} {:?}", i, input.name, input.input_type);
+                    log::info!("Loaded: {}", path.display());
+                    for (i, inp) in session.inputs.iter().enumerate() {
+                        log::debug!("  in[{}]: {} {:?}", i, inp.name, inp.input_type);
                     }
-                    for (i, output) in session.outputs.iter().enumerate() {
-                        log::debug!("  enc output[{}]: {} {:?}", i, output.name, output.output_type);
+                    for (i, out) in session.outputs.iter().enumerate() {
+                        log::debug!("  out[{}]: {} {:?}", i, out.name, out.output_type);
                     }
-                    loaded.push(path);
-                    enc_session = Some(session);
+                    Some(session)
                 }
                 Err(e) => {
-                    log::warn!("Failed to load encoder {}: {e}", path.display());
+                    log::warn!("Failed {}: {e}", path.display());
+                    None
                 }
+            }
+        };
+
+        let mut enc = None;
+        let mut erb_dec = None;
+        let mut df_dec = None;
+
+        if has_split {
+            if let Some(s) = load(&enc_path) {
+                loaded.push(enc_path);
+                enc = Some(s);
+            }
+            if let Some(s) = load(&erb_path) {
+                loaded.push(erb_path);
+                erb_dec = Some(s);
+            }
+            if let Some(s) = load(&df_path) {
+                loaded.push(df_path);
+                df_dec = Some(s);
+            }
+        } else {
+            let path = if combined.exists() { &combined } else { &combined2 };
+            if let Some(s) = load(path) {
+                loaded.push(path.clone());
+                enc = Some(s);
             }
         }
 
-        for path in [&erb_path, &df_path] {
-            if path.exists() {
-                match ort::session::Session::builder(&env).and_then(|b| b.commit_from_file(path)) {
-                    Ok(_) => {
-                        log::info!("Validated decoder: {}", path.display());
-                        loaded.push(path.clone());
-                    }
-                    Err(e) => log::warn!("Failed to validate {}: {e}", path.display()),
-                }
-            }
-        }
-
-        let ready = enc_session.is_some() || !loaded.is_empty();
+        let ready = enc.is_some();
 
         Ok(Self {
             ready,
-            enc: enc_session,
+            enc,
+            erb_dec,
+            df_dec,
             loaded_paths: loaded,
         })
     }
 
-    fn run_encoder(
-        &mut self,
-        spectrum: &[Complex<f32>],
-        strength: f32,
-        out_spectrum: &mut [Complex<f32>],
-    ) -> bool {
-        let Some(ref mut session) = self.enc else {
+    fn enhance(&mut self, spectrum: &mut [Complex<f32>], strength: f32) -> bool {
+        let Some(ref mut enc) = self.enc else {
             return false;
         };
 
         let erb = compute_erb_features(spectrum);
-        let (spec_re, _spec_im) = compute_spec_features(spectrum);
-
-        let erb_array = ndarray::Array4::from_shape_vec((1, 1, 1, NB_ERB), erb.to_vec())
-            .expect("erb shape");
         let mut spec_ch = vec![0.0f32; 2 * NB_DF];
         for k in 0..NB_DF {
             spec_ch[k] = spectrum.get(k).map(|c| c.re).unwrap_or(0.0);
             spec_ch[NB_DF + k] = spectrum.get(k).map(|c| c.im).unwrap_or(0.0);
         }
-        let spec_array =
-            ndarray::Array4::from_shape_vec((1, 2, 1, NB_DF), spec_ch).expect("spec shape");
 
-        let run_result = (|| {
+        let erb_array =
+            ndarray::Array4::from_shape_vec((1, 1, 1, NB_ERB), erb.to_vec()).ok();
+        let spec_array =
+            ndarray::Array4::from_shape_vec((1, 2, 1, NB_DF), spec_ch).ok();
+
+        let (Some(erb_array), Some(spec_array)) = (erb_array, spec_array) else {
+            return false;
+        };
+
+        let enc_outputs = {
             use ort::value::Tensor;
-            let erb_tensor = Tensor::from_array(erb_array)?;
-            let spec_tensor = Tensor::from_array(spec_array)?;
+            let erb_t = match Tensor::from_array(erb_array) {
+                Ok(t) => t,
+                Err(_) => return false,
+            };
+            let spec_t = match Tensor::from_array(spec_array) {
+                Ok(t) => t,
+                Err(_) => return false,
+            };
 
             let attempts = [
-                vec![("feat_erb", erb_tensor.clone()), ("feat_spec", spec_tensor.clone())],
-                vec![("erb", erb_tensor.clone()), ("spec", spec_tensor.clone())],
-                vec![("input", erb_tensor)],
+                vec![("feat_erb", erb_t.clone()), ("feat_spec", spec_t.clone())],
+                vec![("erb", erb_t.clone()), ("spec", spec_t.clone())],
+                vec![("input", erb_t)],
             ];
 
+            let mut result = None;
             for inputs in attempts {
                 let owned: Vec<(String, ort::value::Value)> = inputs
                     .into_iter()
                     .map(|(n, t)| (n.to_string(), t.into()))
                     .collect();
-                match session.run(owned) {
-                    Ok(outputs) => {
-                        log::trace!("Encoder ran successfully, {} outputs", outputs.len());
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        log::trace!("Encoder attempt failed: {e}");
-                        continue;
+                if let Ok(outputs) = enc.run(owned) {
+                    log::trace!("Encoder OK, {} outputs", outputs.len());
+                    result = Some(outputs);
+                    break;
+                }
+            }
+            result
+        };
+
+        let Some(enc_out) = enc_outputs else {
+            return false;
+        };
+
+        // ERB decoder → mask
+        let mut mask = [1.0f32; NB_ERB];
+        if let Some(ref mut erb_dec) = self.erb_dec {
+            let try_names = ["emb", "e3", "e2", "e1", "e0", "output", "0"];
+            for name in try_names {
+                if let Some(val) = enc_out.get(name) {
+                    let inputs = vec![(name.to_string(), val.clone())];
+                    if let Ok(dec_out) = erb_dec.run(inputs) {
+                        if let Some((_, v)) = dec_out.iter().next() {
+                            if let Ok(arr) = v.try_extract_tensor::<f32>() {
+                                let slice = arr.view();
+                                let data = slice.as_slice().unwrap_or(&[]);
+                                for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                                    mask[i] = x.clamp(0.0, 1.0);
+                                }
+                                log::trace!("ERB mask extracted");
+                            }
+                        }
+                        break;
                     }
                 }
             }
-            Err(ort::Error::new("all encoder input-name attempts failed"))
-        })();
-
-        match run_result {
-            Ok(()) => {
-                apply_spectral_suppression(out_spectrum, strength * 0.7);
-                true
-            }
-            Err(_) => false,
         }
+
+        // DF decoder → coefficients
+        let mut coefs: Vec<f32> = Vec::new();
+        if let Some(ref mut df_dec) = self.df_dec {
+            let try_names = ["emb", "c0", "output", "0"];
+            for name in try_names {
+                if let Some(val) = enc_out.get(name) {
+                    let inputs = vec![(name.to_string(), val.clone())];
+                    if let Ok(dec_out) = df_dec.run(inputs) {
+                        if let Some((_, v)) = dec_out.iter().next() {
+                            if let Ok(arr) = v.try_extract_tensor::<f32>() {
+                                let slice = arr.view();
+                                if let Some(data) = slice.as_slice() {
+                                    coefs.extend_from_slice(data);
+                                    log::trace!("DF coefs extracted");
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        apply_erb_mask(spectrum, &mask, strength);
+        if !coefs.is_empty() {
+            apply_deep_filter(spectrum, &coefs, strength);
+        }
+        apply_spectral_suppression(spectrum, strength * 0.25);
+
+        true
     }
 }
 
-// ─── Spectral enhancement ────────────────────────────────────────────────
+// ─── Spectral fallback ──────────────────────────────────────────────────
 
 fn apply_spectral_suppression(spectrum: &mut [Complex<f32>], strength: f32) {
     let strength = strength.clamp(0.0, 1.0);
@@ -352,7 +440,6 @@ pub struct DeepFilterNetEngine {
 impl DeepFilterNetEngine {
     pub fn new(config: DeepFilterNetConfig) -> Result<Self> {
         let onnx = OnnxModels::try_load(&config.model_dir)?;
-
         Ok(Self {
             config,
             stft: Stft::new(),
@@ -398,9 +485,7 @@ impl NoiseEngine for DeepFilterNetEngine {
             let hop = &work[in_pos..in_pos + HOP_SIZE];
 
             let enhanced = self.stft.process_hop(hop, |spectrum| {
-                let spec_copy: Vec<Complex<f32>> = spectrum.to_vec();
-                let neural_ok = self.onnx.run_encoder(&spec_copy, strength, spectrum);
-                if !neural_ok {
+                if !self.onnx.enhance(spectrum, strength) {
                     apply_spectral_suppression(spectrum, strength);
                 }
             });
