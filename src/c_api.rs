@@ -112,7 +112,7 @@ pub unsafe extern "C" fn nc_create_with_rate(
     if out.is_null() {
         return NcStatus::ErrNullPointer as i32;
     }
-    ptr::write(out, ptr::null_mut());
+    unsafe { ptr::write(out, ptr::null_mut()) };
 
     let eng = match engine {
         0 => NcEngine::Rnnoise,
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn nc_create_multi_with_rate(
     if out.is_null() {
         return NcStatus::ErrNullPointer as i32;
     }
-    ptr::write(out, ptr::null_mut());
+    unsafe { ptr::write(out, ptr::null_mut()) };
 
     let eng = match engine {
         0 => NcEngine::Rnnoise,
