@@ -201,7 +201,7 @@ pub unsafe extern "C" fn nc_flush(
         return NcStatus::ErrNullPointer as i32;
     }
     let h = unsafe { &mut *handle };
-    let output_slice = if capacity == 0 {
+    let output_slice: &mut [f32] = if capacity == 0 {
         &mut []
     } else {
         unsafe { std::slice::from_raw_parts_mut(output, capacity) }
@@ -431,7 +431,7 @@ pub unsafe extern "C" fn nc_flush_interleaved(
         Some(n) => n,
         None => return NcStatus::ErrInvalidArg as i32,
     };
-    let output_slice = if samples == 0 {
+    let output_slice: &mut [f32] = if samples == 0 {
         &mut []
     } else {
         unsafe { std::slice::from_raw_parts_mut(output, samples) }
