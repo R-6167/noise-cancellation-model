@@ -483,3 +483,51 @@ pub unsafe extern "C" fn nc_multi_set_strength(handle: *mut NcMultiHandle, stren
     unsafe { (*handle).multi.set_strength(Strength(strength)) };
     NcStatus::Ok as i32
 }
+
+
+#[cfg(test)]
+mod overlap_tests {
+    use super::*;
+
+    #[test]
+    fn single_channel_partial_overlap_is_safe() {
+        let mut handle: *mut NcHandle = ptr::null_mut();
+        let status = unsafe {
+            nc_create(NcEngine::Rnnoise as i32, ptr::null(), 0.85, &mut handle)
+        };
+        assert_eq!(status, NcStatus::Ok as i32);
+        assert!(!handle.is_null());
+
+        let mut buffer = [0.1f32; 129];
+        let status = unsafe {
+            nc_process(handle, buffer.as_ptr(), buffer.as_mut_ptr().add(1), 128)
+        };
+        assert_eq!(status, NcStatus::Ok as i32);
+        assert!(buffer[1..].iter().all(|sample| sample.is_finite()));
+        unsafe { nc_destroy(handle) };
+    }
+
+    #[test]
+    fn interleaved_partial_overlap_is_safe() {
+        let mut handle: *mut NcMultiHandle = ptr::null_mut();
+        let status = unsafe {
+            nc_create_multi(
+                NcEngine::Rnnoise as i32,
+                ptr::null(),
+                0.85,
+                2,
+                &mut handle,
+            )
+        };
+        assert_eq!(status, NcStatus::Ok as i32);
+        assert!(!handle.is_null());
+
+        let mut buffer = [0.1f32; 65];
+        let status = unsafe {
+            nc_process_interleaved(handle, buffer.as_ptr(), buffer.as_mut_ptr().add(1), 32)
+        };
+        assert_eq!(status, NcStatus::Ok as i32);
+        assert!(buffer[1..].iter().all(|sample| sample.is_finite()));
+        unsafe { nc_destroy_multi(handle) };
+    }
+}
