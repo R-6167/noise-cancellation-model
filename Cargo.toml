@@ -1,6 +1,6 @@
 [package]
 name = "noise_cancellation"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 description = "High-quality real-time and offline noise cancellation library (DeepFilterNet3 + RNNoise)"
 license = "MIT OR Apache-2.0"
