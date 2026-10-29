@@ -8,9 +8,9 @@
 //! is diagnostic only and must not hide alignment or latency bugs.
 
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
-use noise_cancellation::{
-    Denoiser, DenoiserConfig, EngineKind, Strength, SAMPLE_RATE,
-};
+use noise_cancellation::engines::deepfilternet::{DeepFilterNetConfig, DeepFilterNetEngine};
+use noise_cancellation::engines::NoiseEngine;
+use noise_cancellation::{Denoiser, DenoiserConfig, EngineKind, Strength, SAMPLE_RATE};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
@@ -84,6 +84,53 @@ fn process_full_stream(
         return Err("flushed output did not contain enough samples to restore duration".into());
     }
     Ok(processed[latency..end].to_vec())
+}
+
+
+/// Run DeepFilterNet directly so the benchmark can report whether each frame
+/// used neural inference or the unity-gain fallback path.
+fn process_deepfilter_stream(
+    noisy: &[f32],
+    model_dir: &Path,
+) -> Result<(Vec<f32>, u64, u64, Vec<PathBuf>), Box<dyn Error>> {
+    let mut engine = DeepFilterNetEngine::new(DeepFilterNetConfig::new(model_dir))?;
+    engine.set_strength(0.85);
+    let latency = engine.latency_samples();
+
+    let mut processed = vec![0.0f32; noisy.len()];
+    const BLOCK: usize = 480 * 50;
+    for (input, output) in noisy.chunks(BLOCK).zip(processed.chunks_mut(BLOCK)) {
+        engine.process(input, output)?;
+    }
+
+    let mut tail = Vec::new();
+    loop {
+        let mut buffer = vec![0.0f32; latency.max(1).min(4096)];
+        let written = engine.flush(&mut buffer)?;
+        tail.extend_from_slice(&buffer[..written]);
+        if written == 0 {
+            break;
+        }
+    }
+
+    let inference_frames = engine.neural_inference_frames();
+    let fallback_frames = engine.neural_fallback_frames();
+    let loaded_models = engine.loaded_model_paths().to_vec();
+
+    processed.extend(tail);
+    let end = latency
+        .checked_add(noisy.len())
+        .ok_or("audio length overflow while trimming DeepFilterNet latency")?;
+    if end > processed.len() {
+        return Err("DeepFilterNet flush did not contain enough samples to restore duration".into());
+    }
+
+    Ok((
+        processed[latency..end].to_vec(),
+        inference_frames,
+        fallback_frames,
+        loaded_models,
+    ))
 }
 
 fn write_mono_wav(path: &Path, samples: &[f32]) -> Result<(), Box<dyn Error>> {
@@ -242,11 +289,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rnnoise = process_full_stream(EngineKind::Rnnoise, &noisy)?;
     print_snr_diagnostics("RNNoise", &clean, &rnnoise, input_snr)?;
 
-    let deepfilter = process_full_stream(
-        EngineKind::DeepFilterNet { model_dir: model_dir.clone() },
-        &noisy,
-    )?;
+    let (deepfilter, inference_frames, fallback_frames, loaded_models) =
+        process_deepfilter_stream(&noisy, &model_dir)?;
     print_snr_diagnostics("DeepFilterNet3", &clean, &deepfilter, input_snr)?;
+    println!(
+        "DeepFilterNet3 inference diagnostics: {inference_frames} successful neural frames, {fallback_frames} fallback frames ({} total); loaded models: {}",
+        inference_frames + fallback_frames,
+        loaded_models.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+    );
+    if inference_frames == 0 || fallback_frames > 0 {
+        println!("WARNING: DeepFilterNet3 benchmark output is not fully backed by successful neural inference.");
+    }
     println!("These scores apply only to this aligned reference pair; listen for speech artifacts as well.");
 
     if let Some(output_dir) = args.get(4) {
