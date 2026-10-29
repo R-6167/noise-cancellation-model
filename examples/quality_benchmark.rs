@@ -49,7 +49,6 @@ fn read_first_channel(path: &Path) -> Result<(u32, Vec<f32>), Box<dyn Error>> {
 
 fn process_full_stream(
     engine: EngineKind,
-    model_dir: &Path,
     noisy: &[f32],
 ) -> Result<Vec<f32>, Box<dyn Error>> {
     let mut denoiser = Denoiser::new(DenoiserConfig {
@@ -83,7 +82,6 @@ fn process_full_stream(
     if end > processed.len() {
         return Err("flushed output did not contain enough samples to restore duration".into());
     }
-    let _ = model_dir; // EngineKind owns the model directory for DeepFilterNet.
     Ok(processed[latency..end].to_vec())
 }
 
@@ -139,13 +137,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Input SNR: {input_snr:.2} dB");
     println!("Strength: 0.85, wet/dry mix disabled, sample rate: {SAMPLE_RATE} Hz");
 
-    let rnnoise = process_full_stream(EngineKind::Rnnoise, &model_dir, &noisy)?;
+    let rnnoise = process_full_stream(EngineKind::Rnnoise, &noisy)?;
     let rn_snr = snr_db(&clean, &rnnoise).ok_or("cannot calculate RNNoise SNR")?;
     println!("RNNoise: {rn_snr:.2} dB SNR ({:+.2} dB vs noisy input)", rn_snr - input_snr);
 
     let deepfilter = process_full_stream(
         EngineKind::DeepFilterNet { model_dir: model_dir.clone() },
-        &model_dir,
         &noisy,
     )?;
     let df_snr = snr_db(&clean, &deepfilter).ok_or("cannot calculate DeepFilterNet SNR")?;
