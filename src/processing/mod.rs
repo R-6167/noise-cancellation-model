@@ -7,6 +7,7 @@ use crate::engines::NoiseEngine;
 #[cfg(all(not(feature = "rnnoise"), feature = "deepfilternet"))]
 use crate::utils::default_model_dir;
 use crate::utils::LinearResampler;
+use std::collections::VecDeque;
 use crate::{Error, Result, FRAME_SIZE, SAMPLE_RATE};
 
 #[cfg(feature = "rnnoise")]
@@ -105,6 +106,8 @@ pub struct Denoiser {
     down: Option<LinearResampler>,
     engine_in: Vec<f32>,
     engine_out: Vec<f32>,
+    dry_queue: VecDeque<f32>,
+    dry_delay_samples: usize,
 }
 
 impl Denoiser {
@@ -124,6 +127,8 @@ impl Denoiser {
             }
         };
 
+        let dry_delay_samples = ((engine.latency_samples() as u64 * config.sample_rate as u64)
+            / SAMPLE_RATE as u64) as usize;
         let (up, down) = if config.sample_rate != SAMPLE_RATE {
             (
                 Some(LinearResampler::new(config.sample_rate, SAMPLE_RATE)),
@@ -141,6 +146,8 @@ impl Denoiser {
             down,
             engine_in: Vec::new(),
             engine_out: Vec::new(),
+            dry_queue: std::iter::repeat_n(0.0, dry_delay_samples).collect(),
+            dry_delay_samples,
         })
     }
 
@@ -203,46 +210,22 @@ impl Denoiser {
         let up = self.up.as_mut().unwrap();
         up.process(input, &mut self.engine_in);
         if self.engine_in.is_empty() {
-            output.fill(0.0);
-            return Ok(());
+            self.dry_queue.extend(input.iter().copied());
+            let strength = self.config.strength.clamp().0;
+        self.dry_queue.extend(input.iter().copied());
+        let down = self.down.as_mut().unwrap();
+        let mut wet_host = std::mem::take(&mut self.wet_buf);
+        down.process(&self.engine_out[..self.engine_in.len()], &mut wet_host);
+        for (i, sample) in output.iter_mut().enumerate() {
+            let dry = self.dry_queue.pop_front().unwrap_or(0.0);
+            let wet = wet_host.get(i).copied().unwrap_or(0.0);
+            *sample = if self.config.wet_dry_mix {
+                dry * (1.0 - strength) + wet * strength
+            } else {
+                wet
+            };
         }
-
-        if self.engine_out.len() < self.engine_in.len() {
-            self.engine_out.resize(self.engine_in.len(), 0.0);
-        }
-        self.engine.process(
-            &self.engine_in,
-            &mut self.engine_out[..self.engine_in.len()],
-        )?;
-
-        let strength = self.config.strength.clamp().0;
-        if self.config.wet_dry_mix && strength < 1.0 {
-            let down = self.down.as_mut().unwrap();
-            let mut wet_host = std::mem::take(&mut self.wet_buf);
-            down.process(&self.engine_out[..self.engine_in.len()], &mut wet_host);
-            let n = input.len().min(wet_host.len());
-            for i in 0..n {
-                output[i] = input[i] * (1.0 - strength) + wet_host[i] * strength;
-            }
-            if n < output.len() {
-                let out_len = output.len();
-                output[n..].copy_from_slice(&input[n..out_len]);
-            }
-            self.wet_buf = wet_host;
-        } else {
-            let down = self.down.as_mut().unwrap();
-            let mut wet_host = std::mem::take(&mut self.wet_buf);
-            down.process(&self.engine_out[..self.engine_in.len()], &mut wet_host);
-            let n = input.len().min(wet_host.len());
-            output[..n].copy_from_slice(&wet_host[..n]);
-            if n < output.len() {
-                let fill = wet_host.last().copied().unwrap_or(0.0);
-                for x in &mut output[n..] {
-                    *x = fill;
-                }
-            }
-            self.wet_buf = wet_host;
-        }
+        self.wet_buf = wet_host;
 
         sanitize_slice(output);
         Ok(())
@@ -255,12 +238,15 @@ impl Denoiser {
         self.engine
             .process(input, &mut self.wet_buf[..input.len()])?;
         let strength = self.config.strength.clamp().0;
-        if self.config.wet_dry_mix && strength < 1.0 {
-            for i in 0..input.len() {
-                output[i] = input[i] * (1.0 - strength) + self.wet_buf[i] * strength;
-            }
-        } else {
-            output.copy_from_slice(&self.wet_buf[..input.len()]);
+        self.dry_queue.extend(input.iter().copied());
+        for (i, sample) in output.iter_mut().enumerate() {
+            let dry = self.dry_queue.pop_front().unwrap_or(0.0);
+            let wet = self.wet_buf[i];
+            *sample = if self.config.wet_dry_mix {
+                dry * (1.0 - strength) + wet * strength
+            } else {
+                wet
+            };
         }
         Ok(())
     }
@@ -275,6 +261,8 @@ impl Denoiser {
         }
         self.engine_in.clear();
         self.engine_out.clear();
+        self.dry_queue.clear();
+        self.dry_queue.extend(std::iter::repeat_n(0.0, self.dry_delay_samples));
     }
 
     pub fn engine_name(&self) -> &'static str {
