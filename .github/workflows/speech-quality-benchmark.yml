@@ -1,0 +1,79 @@
+name: Remote Speech Quality Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      clean_wav_url:
+        description: "HTTPS direct-download URL for the clean reference WAV (48 kHz, mono preferred)"
+        required: true
+        type: string
+      noisy_wav_url:
+        description: "HTTPS direct-download URL for the matching noisy WAV (same speech, aligned, 48 kHz)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: speech-quality-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Run paired speech benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate download URLs
+        env:
+          CLEAN_URL: ${{ inputs.clean_wav_url }}
+          NOISY_URL: ${{ inputs.noisy_wav_url }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          for name in ("CLEAN_URL", "NOISY_URL"):
+              value = os.environ[name]
+              parsed = urlparse(value)
+              if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                  raise SystemExit(f"{name} must be a valid HTTPS URL without embedded credentials")
+          PY
+
+      - name: Download paired WAV files
+        env:
+          CLEAN_URL: ${{ inputs.clean_wav_url }}
+          NOISY_URL: ${{ inputs.noisy_wav_url }}
+        run: |
+          mkdir -p benchmark-input benchmark-output
+          curl --fail --location --silent --show-error --proto '=https' --max-filesize 100000000 "$CLEAN_URL" --output benchmark-input/clean.wav
+          curl --fail --location --silent --show-error --proto '=https' --max-filesize 100000000 "$NOISY_URL" --output benchmark-input/noisy.wav
+          test -s benchmark-input/clean.wav
+          test -s benchmark-input/noisy.wav
+          ls -lh benchmark-input/
+
+      - name: Run paired benchmark
+        run: |
+          cargo run --release --features cli --example quality_benchmark -- \
+            benchmark-input/clean.wav benchmark-input/noisy.wav models benchmark-output \
+            2>&1 | tee benchmark-output/report.txt
+
+      - name: Upload benchmark report and listening outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: speech-quality-benchmark-${{ github.run_number }}
+          path: |
+            benchmark-output/
+          if-no-files-found: warn
+          retention-days: 14
