@@ -260,8 +260,12 @@ impl DfHistory {
         for k in 0..NB_DF.min(out.len()) {
             let mut acc = Complex::new(0.0, 0.0);
             for n in 0..n_frames {
-                let c_re = coefs.get((n * NB_DF + k) * 2).copied().unwrap_or(0.0);
-                let c_im = coefs.get((n * NB_DF + k) * 2 + 1).copied().unwrap_or(0.0);
+                // The ONNX DF decoder emits [batch, time, frequency, order * 2].
+                // With one inference frame, flattening is frequency-major, then
+                // coefficient order, then real/imaginary components.
+                let coefficient = (k * DF_ORDER + n) * 2;
+                let c_re = coefs.get(coefficient).copied().unwrap_or(0.0);
+                let c_im = coefs.get(coefficient + 1).copied().unwrap_or(0.0);
                 let idx = self.frames.len() - n_frames + n;
                 acc += Complex::new(c_re, c_im) * self.frames[idx][k];
             }
@@ -293,6 +297,33 @@ mod readiness_tests {
         assert!(!model_pipeline_ready(false, true, true, false));
         assert!(!model_pipeline_ready(false, true, false, false));
         assert!(!model_pipeline_ready(false, false, true, true));
+    }
+
+    #[test]
+    fn deep_filter_history_uses_frequency_major_coefficient_layout() {
+        use super::{DfHistory, Complex, DF_ORDER, NB_DF};
+
+        let mut history = DfHistory::new();
+        for frame_index in 0..DF_ORDER {
+            let spectrum: Vec<Complex<f32>> = (0..NB_DF)
+                .map(|bin| Complex::new((frame_index * 100 + bin) as f32, 0.0))
+                .collect();
+            history.push(&spectrum);
+        }
+
+        let mut coefs = vec![0.0f32; DF_ORDER * NB_DF * 2];
+        for bin in 0..NB_DF {
+            for order in 0..DF_ORDER {
+                coefs[(bin * DF_ORDER + order) * 2] = 1.0;
+            }
+        }
+
+        let mut output = [Complex::new(0.0, 0.0); NB_DF];
+        history.apply(&coefs, &mut output);
+
+        // At bin 3, sum the five frame values: 3 + 103 + 203 + 303 + 403.
+        assert_eq!(output[3].re, 1015.0);
+        assert_eq!(output[3].im, 0.0);
     }
 }
 
