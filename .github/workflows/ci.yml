@@ -48,6 +48,8 @@ jobs:
         run: cargo build --release --features "cli,deepfilternet"
       - name: Build-check library only
         run: cargo build --release --features deepfilternet
+      - name: DeepFilterNet3 smoke tests
+        run: cargo test --release --features deepfilternet --test dfn3_smoke
 
   lint:
     name: Lint
