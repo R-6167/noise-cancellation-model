@@ -1,6 +1,7 @@
 //! High-level denoising API intended for application integration.
 
 use crate::engines::NoiseEngine;
+use crate::utils::default_model_dir;
 use crate::{Error, Result, FRAME_SIZE, SAMPLE_RATE};
 
 #[cfg(feature = "rnnoise")]
@@ -15,7 +16,7 @@ pub enum EngineKind {
     /// Ultra-lightweight RNNoise (default when feature enabled).
     #[cfg(feature = "rnnoise")]
     Rnnoise,
-    /// Higher-quality DeepFilterNet3 (requires `deepfilternet` feature + model files).
+    /// Higher-quality DeepFilterNet3 (requires `deepfilternet` feature + local model files).
     #[cfg(feature = "deepfilternet")]
     DeepFilterNet {
         /// Directory containing the ONNX model files.
@@ -32,7 +33,7 @@ impl Default for EngineKind {
         #[cfg(all(not(feature = "rnnoise"), feature = "deepfilternet"))]
         {
             EngineKind::DeepFilterNet {
-                model_dir: std::path::PathBuf::from("models"),
+                model_dir: default_model_dir(),
             }
         }
         #[cfg(all(not(feature = "rnnoise"), not(feature = "deepfilternet")))]
@@ -109,12 +110,12 @@ impl Denoiser {
         })
     }
 
-    /// Convenience constructor with default settings (RNNoise when available).
+    /// Convenience constructor with default settings (RNNoise – fully offline).
     pub fn with_defaults() -> Result<Self> {
         Self::new(DenoiserConfig::default())
     }
 
-    /// Create a Denoiser that uses DeepFilterNet3.
+    /// Create a Denoiser that uses DeepFilterNet3 with an explicit model directory.
     #[cfg(feature = "deepfilternet")]
     pub fn with_deepfilternet(model_dir: impl Into<std::path::PathBuf>) -> Result<Self> {
         let config = DenoiserConfig {
@@ -124,6 +125,23 @@ impl Denoiser {
             ..Default::default()
         };
         Self::new(config)
+    }
+
+    /// Create a DeepFilterNet3 denoiser using auto-discovered local models.
+    ///
+    /// Searches `NOISE_CANCEL_MODEL_DIR`, `./models`, crate `models/`, and
+    /// `<exe>/models`. No network access.
+    #[cfg(feature = "deepfilternet")]
+    pub fn with_deepfilternet_auto() -> Result<Self> {
+        let model_dir = crate::utils::find_model_dir().ok_or_else(|| {
+            Error::Engine(
+                "DeepFilterNet3 models not found. Place enc.onnx, erb_dec.onnx, df_dec.onnx \
+                 in ./models or set NOISE_CANCEL_MODEL_DIR. RNNoise needs no models: \
+                 Denoiser::with_defaults()."
+                    .into(),
+            )
+        })?;
+        Self::with_deepfilternet(model_dir)
     }
 
     /// Process a buffer of mono f32 samples at 48 kHz.
