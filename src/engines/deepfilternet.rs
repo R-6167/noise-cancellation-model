@@ -443,7 +443,7 @@ impl DeepFilterNetEngine {
     }
 
     pub fn set_strength(&mut self, s: f32) {
-        self.strength = s.clamp(0.0, 1.0);
+        self.strength = if s.is_finite() { s.clamp(0.0, 1.0) } else { 0.0 };
     }
     pub fn models_ready(&self) -> bool {
         self.onnx.ready
