@@ -41,3 +41,33 @@ fn reset_is_safe() {
     let mut output = vec![0.0f32; FRAME_SIZE];
     den.process(&input, &mut output).unwrap();
 }
+
+
+#[test]
+fn wet_dry_mix_aligns_delayed_dry_signal_with_wet_output() {
+    let input: Vec<f32> = (0..FRAME_SIZE * 8)
+        .map(|i| ((i * 13 % 97) as f32) / 100.0)
+        .collect();
+    let mut wet_only = Denoiser::new(DenoiserConfig {
+        strength: Strength(1.0),
+        wet_dry_mix: false,
+        ..Default::default()
+    }).unwrap();
+    let mut mixed = Denoiser::new(DenoiserConfig {
+        strength: Strength(0.5),
+        wet_dry_mix: true,
+        ..Default::default()
+    }).unwrap();
+    let latency = mixed.latency_samples();
+    let mut wet = vec![0.0; input.len()];
+    let mut output = vec![0.0; input.len()];
+    wet_only.process(&input, &mut wet).unwrap();
+    mixed.process(&input, &mut output).unwrap();
+
+    for i in 0..output.len() {
+        let dry = if i >= latency { input[i - latency] } else { 0.0 };
+        let expected = dry * 0.5 + wet[i] * 0.5;
+        assert!((output[i] - expected).abs() < 1e-6,
+            "wet/dry alignment mismatch at {i}: {} vs {expected}", output[i]);
+    }
+}
