@@ -50,3 +50,22 @@ fn strength_and_reset() {
     let mut output = vec![0.0f32; frames * 2];
     m.process_interleaved(&input, &mut output, frames).unwrap();
 }
+
+
+#[test]
+fn interleaved_flush_drains_equal_tail_frames_for_each_channel() {
+    let mut m = MultiDenoiser::new(2, DenoiserConfig::default()).unwrap();
+    let input = vec![0.08f32; 2 * 997];
+    let mut output = vec![0.0f32; input.len()];
+    m.process_interleaved(&input, &mut output, 997).unwrap();
+
+    let mut total_frames = 0;
+    loop {
+        let mut tail = vec![0.0f32; 2 * 37];
+        let frames = m.flush_interleaved(&mut tail).unwrap();
+        assert!(tail[..frames * 2].iter().all(|sample| sample.is_finite()));
+        total_frames += frames;
+        if frames == 0 { break; }
+    }
+    assert_eq!(total_frames, 480);
+}
