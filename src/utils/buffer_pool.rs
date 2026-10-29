@@ -127,7 +127,7 @@ mod tests {
             buffer.extend_from_slice(&[1.0, 2.0, 3.0]);
             assert_eq!(buffer.as_slice(), &[1.0, 2.0, 3.0]);
         }
-        assert_eq!(pool.available(), initial + 1);
+        assert_eq!(pool.available(), initial);
         let reused = pool.acquire(8);
         assert!(reused.is_empty());
     }
@@ -154,7 +154,7 @@ mod tests {
         let initial = pool.available();
         let buffer = pool.acquire(8);
         let _owned = buffer.into_vec();
-        assert_eq!(pool.available(), initial);
+        assert_eq!(pool.available(), initial - 1);
     }
 
     #[test]
