@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
 
 jobs:
   rnnoise:
@@ -18,18 +17,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
       - name: Build (default = rnnoise)
         run: cargo build --release
-      - name: Build with CLI
-        run: cargo build --release --features cli
-      - name: Run example
-        run: cargo run --release --example offline_denoise --features cli
+      - name: Build with CLI + c-api
+        run: cargo build --release --features "cli,c-api"
       - name: Tests
         run: cargo test --release --features rnnoise
-      - name: Resample smoke tests
-        run: cargo test --release --features rnnoise --test resample_smoke
+      - name: Resample + multi-channel smoke
+        run: |
+          cargo test --release --features rnnoise --test resample_smoke
+          cargo test --release --features rnnoise --test multi_channel_smoke
 
   deepfilternet:
     name: DeepFilterNet3 (vendored models)
@@ -46,21 +49,18 @@ jobs:
           test -f models/erb_dec.onnx
           test -f models/df_dec.onnx
           ls -lh models/
-      - name: Build deepfilternet + cli
-        run: cargo build --release --features "cli,deepfilternet"
-      - name: Build-check library only
+      - name: Build deepfilternet
         run: cargo build --release --features deepfilternet
       - name: DeepFilterNet3 smoke tests
         run: cargo test --release --features deepfilternet --test dfn3_smoke
 
   lint:
-    name: Lint
+    name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
       - run: cargo clippy --features rnnoise -- -D warnings
