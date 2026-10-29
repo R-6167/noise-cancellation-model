@@ -134,6 +134,7 @@ impl NoiseEngine for RnnoiseEngine {
 mod tests {
     use super::RnnoiseEngine;
     use crate::engines::NoiseEngine;
+    use crate::FRAME_SIZE;
 
     fn render_in_chunks(input: &[f32], chunk_size: usize) -> Vec<f32> {
         let mut engine = RnnoiseEngine::new();
