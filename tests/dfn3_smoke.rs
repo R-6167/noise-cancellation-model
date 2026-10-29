@@ -177,7 +177,7 @@ fn streaming_chunks_match_block_energy_order() {
 
     let mut den2 = Denoiser::with_deepfilternet(&dir).unwrap();
     let mut out2 = vec![0.0f32; n];
-    let chunk = FRAME_SIZE * 4;
+    let chunk = 127;
     for start in (0..n).step_by(chunk) {
         let end = (start + chunk).min(n);
         den2.process(&input[start..end], &mut out2[start..end])
@@ -186,6 +186,10 @@ fn streaming_chunks_match_block_energy_order() {
 
     assert!(out1.iter().all(|x| x.is_finite()));
     assert!(out2.iter().all(|x| x.is_finite()));
+    let max_diff = out1.iter().zip(&out2)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(max_diff <= 1e-6, "chunk boundaries changed output; max_diff={max_diff}");
     let e1: f32 = out1.iter().map(|x| x * x).sum();
     let e2: f32 = out2.iter().map(|x| x * x).sum();
     assert!(e1.is_finite() && e2.is_finite());
