@@ -20,6 +20,13 @@ pub trait NoiseEngine: Send {
     /// Input and output lengths must match.
     fn process(&mut self, input: &[f32], output: &mut [f32]) -> crate::Result<()>;
 
+    /// Finish the current stream and drain its remaining algorithmic tail.
+    ///
+    /// The caller may provide a small output buffer and call this repeatedly.
+    /// Returns the number of valid samples written. Once flushed, `process`
+    /// returns an error until `reset` starts a new stream.
+    fn flush(&mut self, output: &mut [f32]) -> crate::Result<usize>;
+
     /// Reset internal state (call between unrelated streams).
     fn reset(&mut self);
 
