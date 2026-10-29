@@ -37,6 +37,19 @@ pub enum NcEngine {
     DeepFilterNet = 1,
 }
 
+fn ranges_overlap(
+    input: *const f32,
+    output: *mut f32,
+    samples: usize,
+) -> Option<bool> {
+    let bytes = samples.checked_mul(std::mem::size_of::<f32>())?;
+    let input_start = input as usize;
+    let output_start = output as usize;
+    let input_end = input_start.checked_add(bytes)?;
+    let output_end = output_start.checked_add(bytes)?;
+    Some(input_start < output_end && output_start < input_end)
+}
+
 fn map_err(e: Error) -> NcStatus {
     match e {
         Error::InvalidConfig(_) => NcStatus::ErrInvalidArg,
@@ -168,20 +181,23 @@ pub unsafe extern "C" fn nc_process(
         return NcStatus::Ok as i32;
     }
 
+    let overlaps = match ranges_overlap(input, output, num_samples) {
+        Some(value) => value,
+        None => return NcStatus::ErrInvalidArg as i32,
+    };
     let h = unsafe { &mut *handle };
-    let in_slice = unsafe { std::slice::from_raw_parts(input, num_samples) };
-    let out_slice = unsafe { std::slice::from_raw_parts_mut(output, num_samples) };
-
-    if std::ptr::eq(input, output as *const f32) {
-        let mut tmp = in_slice.to_vec();
-        match h.den.process(in_slice, &mut tmp) {
-            Ok(()) => {
-                out_slice.copy_from_slice(&tmp);
-                NcStatus::Ok as i32
-            }
+    if overlaps {
+        // Copy before creating the mutable output slice so partial overlap is never aliased.
+        let input_copy =
+            unsafe { std::slice::from_raw_parts(input, num_samples) }.to_vec();
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(output, num_samples) };
+        match h.den.process(&input_copy, out_slice) {
+            Ok(()) => NcStatus::Ok as i32,
             Err(e) => map_err(e) as i32,
         }
     } else {
+        let in_slice = unsafe { std::slice::from_raw_parts(input, num_samples) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(output, num_samples) };
         match h.den.process(in_slice, out_slice) {
             Ok(()) => NcStatus::Ok as i32,
             Err(e) => map_err(e) as i32,
