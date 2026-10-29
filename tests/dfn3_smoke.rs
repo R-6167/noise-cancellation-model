@@ -11,6 +11,7 @@ use noise_cancellation::{
     find_model_dir, is_model_dir, Denoiser, DenoiserConfig, EngineKind, Strength, FRAME_SIZE,
     SAMPLE_RATE,
 };
+use noise_cancellation::engines::NoiseEngine;
 use std::path::PathBuf;
 
 fn model_dir() -> Option<PathBuf> {
@@ -193,4 +194,42 @@ fn streaming_chunks_match_block_energy_order() {
     let e1: f32 = out1.iter().map(|x| x * x).sum();
     let e2: f32 = out2.iter().map(|x| x * x).sum();
     assert!(e1.is_finite() && e2.is_finite());
+}
+
+
+#[test]
+fn engine_flush_preserves_partial_hop_and_drains_reported_latency() {
+    let dir = require_models();
+    let input: Vec<f32> = (0..FRAME_SIZE * 4 + 137)
+        .map(|i| (i as f32 * 0.019).sin() * 0.1)
+        .collect();
+
+    fn render(input: &[f32], chunk: usize, tail_chunk: usize, dir: &std::path::Path) -> Vec<f32> {
+        let mut engine = noise_cancellation::engines::deepfilternet::DeepFilterNetEngine::from_path(dir).unwrap();
+        let mut out = vec![0.0; input.len()];
+        let mut offset = 0;
+        while offset < input.len() {
+            let end = (offset + chunk).min(input.len());
+            engine.process(&input[offset..end], &mut out[offset..end]).unwrap();
+            offset = end;
+        }
+        let mut tail = Vec::new();
+        loop {
+            let mut buffer = vec![0.0; tail_chunk];
+            let count = engine.flush(&mut buffer).unwrap();
+            tail.extend_from_slice(&buffer[..count]);
+            if count == 0 { break; }
+        }
+        assert_eq!(tail.len(), engine.latency_samples());
+        out.extend(tail);
+        out
+    }
+
+    let reference = render(&input, input.len(), 480, &dir);
+    let chunked = render(&input, 127, 73, &dir);
+    assert_eq!(reference.len(), chunked.len());
+    for (i, (a, b)) in reference.iter().zip(&chunked).enumerate() {
+        assert!((a - b).abs() <= 1e-6,
+            "flush/chunk mismatch at {i}: {a} vs {b}");
+    }
 }

@@ -394,6 +394,8 @@ pub struct DeepFilterNetEngine {
     pool: AudioBufferPool,
     remainder: Vec<f32>,
     output_queue: VecDeque<f32>,
+    flushing: bool,
+    flush_remaining: usize,
     strength: f32,
     power: [f32; N_FREQS],
     erb_feat: [f32; NB_ERB],
@@ -423,6 +425,8 @@ impl DeepFilterNetEngine {
             pool: AudioBufferPool::for_streaming(),
             remainder: Vec::with_capacity(HOP_SIZE * 2),
             output_queue: std::iter::repeat_n(0.0, initial_latency).collect(),
+            flushing: false,
+            flush_remaining: 0,
             strength: 0.85,
             power: [0.0; N_FREQS],
             erb_feat: [0.0; NB_ERB],
@@ -625,6 +629,9 @@ impl DeepFilterNetEngine {
 
 impl NoiseEngine for DeepFilterNetEngine {
     fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
+        if self.flushing {
+            return Err(Error::InvalidConfig("stream has been flushed; call reset before processing more audio".into()));
+        }
         if input.len() != output.len() {
             return Err(Error::InvalidConfig(
                 "input and output buffers must have the same length".into(),
@@ -657,11 +664,43 @@ impl NoiseEngine for DeepFilterNetEngine {
         Ok(())
     }
 
+    fn flush(&mut self, output: &mut [f32]) -> Result<usize> {
+        if output.is_empty() || self.flush_remaining == 0 && self.flushing {
+            return Ok(0);
+        }
+        if !self.flushing {
+            self.flushing = true;
+            self.flush_remaining = self.latency_samples();
+            if !self.remainder.is_empty() {
+                let mut final_hop = [0.0f32; HOP_SIZE];
+                final_hop[..self.remainder.len()].copy_from_slice(&self.remainder);
+                self.stft.analyze_hop(&final_hop);
+                let mut spectrum = std::mem::take(&mut self.stft.spectrum);
+                self.enhance_spectrum(&mut spectrum);
+                self.stft.spectrum = spectrum;
+                let enhanced = self.stft.synthesize_hop();
+                self.output_queue.extend(enhanced);
+                self.remainder.clear();
+            }
+        }
+        let count = output.len().min(self.flush_remaining);
+        for sample in output.iter_mut().take(count) {
+            *sample = self.output_queue.pop_front().unwrap_or(0.0);
+        }
+        self.flush_remaining -= count;
+        if self.flush_remaining == 0 {
+            self.output_queue.clear();
+        }
+        Ok(count)
+    }
+
     fn reset(&mut self) {
         self.remainder.clear();
         self.output_queue.clear();
         let latency = self.latency_samples();
         self.output_queue.extend(std::iter::repeat_n(0.0, latency));
+        self.flushing = false;
+        self.flush_remaining = 0;
         self.stft.reset();
         self.erb_norm.reset();
         self.spec_norm.reset();
