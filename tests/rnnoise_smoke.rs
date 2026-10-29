@@ -121,3 +121,11 @@ fn denoiser_flush_reports_host_rate_tail_length() {
         assert!(tail.iter().all(|sample| sample.is_finite()));
     }
 }
+
+
+#[test]
+fn non_finite_strength_is_safely_clamped() {
+    assert_eq!(Strength(f32::NAN).clamp().0, 0.0);
+    assert_eq!(Strength(f32::INFINITY).clamp().0, 0.0);
+    assert_eq!(Strength(f32::NEG_INFINITY).clamp().0, 0.0);
+}
