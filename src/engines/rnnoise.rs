@@ -15,6 +15,8 @@ pub struct RnnoiseEngine {
     remainder: Vec<f32>,
     pool: AudioBufferPool,
     output_queue: VecDeque<f32>,
+    flushing: bool,
+    flush_remaining: usize,
 }
 
 impl RnnoiseEngine {
@@ -28,6 +30,8 @@ impl RnnoiseEngine {
             pool: AudioBufferPool::for_streaming(),
             // Keep the documented frame latency constant regardless of caller block size.
             output_queue: std::iter::repeat_n(0.0, FRAME_SIZE).collect(),
+            flushing: false,
+            flush_remaining: 0,
         }
     }
 }
@@ -40,6 +44,9 @@ impl Default for RnnoiseEngine {
 
 impl NoiseEngine for RnnoiseEngine {
     fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
+        if self.flushing {
+            return Err(Error::InvalidConfig("stream has been flushed; call reset before processing more audio".into()));
+        }
         if input.len() != output.len() {
             return Err(Error::InvalidConfig(
                 "input and output buffers must have the same length".into(),
@@ -75,11 +82,42 @@ impl NoiseEngine for RnnoiseEngine {
         Ok(())
     }
 
+    fn flush(&mut self, output: &mut [f32]) -> Result<usize> {
+        if output.is_empty() || self.flush_remaining == 0 && self.flushing {
+            return Ok(0);
+        }
+        if !self.flushing {
+            self.flushing = true;
+            self.flush_remaining = self.latency_samples();
+            if !self.remainder.is_empty() {
+                self.frame_in.fill(0.0);
+                self.frame_in[..self.remainder.len()].copy_from_slice(&self.remainder);
+                for sample in self.frame_in.iter_mut() {
+                    *sample *= 32768.0;
+                }
+                self.state.process_frame(&mut self.frame_out, &self.frame_in);
+                self.output_queue.extend(self.frame_out.iter().map(|sample| sample / 32768.0));
+                self.remainder.clear();
+            }
+        }
+        let count = output.len().min(self.flush_remaining);
+        for sample in output.iter_mut().take(count) {
+            *sample = self.output_queue.pop_front().unwrap_or(0.0);
+        }
+        self.flush_remaining -= count;
+        if self.flush_remaining == 0 {
+            self.output_queue.clear();
+        }
+        Ok(count)
+    }
+
     fn reset(&mut self) {
         self.state = DenoiseState::new();
         self.remainder.clear();
         self.output_queue.clear();
         self.output_queue.extend(std::iter::repeat_n(0.0, FRAME_SIZE));
+        self.flushing = false;
+        self.flush_remaining = 0;
     }
 
     fn name(&self) -> &'static str {
