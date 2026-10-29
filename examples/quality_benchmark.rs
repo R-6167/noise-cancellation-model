@@ -165,7 +165,8 @@ fn best_lag_snr_db(clean: &[f32], estimate: &[f32], max_lag: usize) -> Option<(f
         if denominator <= 1e-20 { -1.0 } else { dot / denominator }
     };
 
-    let coarse_step = 48isize.min(bound.max(1));
+    // For short clips, scan every lag exactly; use a coarser grid only for long clips.
+    let coarse_step = if bound <= 48 { 1 } else { 48 };
     let mut best_lag = 0isize;
     let mut best_correlation = f64::NEG_INFINITY;
     let mut lag = -bound;
