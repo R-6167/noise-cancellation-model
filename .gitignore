@@ -4,6 +4,7 @@ Cargo.lock
 .idea/
 .vscode/
 *.wav
-models/*.onnx
-models/*.bin
 .DS_Store
+# Uncomment if you prefer not to commit ONNX weights:
+# models/*.onnx
+models/*.bin

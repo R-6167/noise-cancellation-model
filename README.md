@@ -1,78 +1,76 @@
 # Noise Cancellation Model
 
-**One library. Two engines. One clean API.**
+**Self-contained. Offline. No model download required for the default engine.**
 
-| Engine | Quality | CPU | Latency | Status |
-|--------|---------|-----|---------|--------|
-| **RNNoise** | Very good | Extremely low | ~10 ms | Production ready |
-| **DeepFilterNet3** | Excellent | Moderate | ~30–40 ms | **True DFN3 DSP path** |
+| Engine | Needs files? | Quality | CPU | Status |
+|--------|--------------|---------|-----|--------|
+| **RNNoise** (default) | **None** – weights embedded | Very good | Extremely low | Production |
+| **DeepFilterNet3** | Optional ONNX in `./models` | Excellent | Moderate | True DFN3 DSP |
 
-## What’s new in 0.4.0 – True DeepFilterNet3
+## Design principle
 
-- Official ERB band widths (32 bands, sum = 481 bins)
-- Forward + inverse ERB filterbank
-- Exponential mean normalization on ERB dB features (α = 0.99)
-- Unit normalization on complex spectral features (first 96 bins)
-- Order-5 deep-filter FIR with spectrum history buffer
-- DF applied on noisy history; high bands from ERB mask
-- Attenuation limit support
-- Combined (`deepfilter.onnx`) or split (`enc` / `erb_dec` / `df_dec`) graphs
-- Strength blends neural output with dry signal
+The library is **independent and self-contained**:
 
-## Pipeline
+- Default path (`Denoiser::with_defaults()`) uses **RNNoise** with weights compiled into the binary.
+- **No network calls** at runtime. Ever.
+- DeepFilterNet3 is opt-in (`feature = "deepfilternet"`) and only reads local ONNX files you already have (or that CI cached).
 
-```
-hop (480 @ 48 kHz)
-  → STFT 960 + Vorbis window
-  → power → ERB analyze → dB → EMA normalize     → feat_erb
-  → complex[:96] → unit normalize                → feat_spec
-  → encoder (+ erb_dec + df_dec  or  combined)
-  → ERB mask → linear-freq gains
-  → DF FIR (order 5) on spectrum history
-  → fuse (DF low bins + ERB high bins) × strength
-  → iSTFT + OLA
-```
-
-## Models
-
-Place in `./models`:
-
-| Layout | Files |
-|--------|--------|
-| Combined | `deepfilter.onnx` or `dfn3.onnx` |
-| Split | `enc.onnx` + `erb_dec.onnx` + `df_dec.onnx` |
-
-Sources:
-- https://github.com/Rikorose/DeepFilterNet → `models/DeepFilterNet3_onnx.tar.gz`
-- https://huggingface.co/soniqo/DeepFilterNet3-ONNX
-
-## Quick Start
+## Quick start (zero download)
 
 ```toml
 [dependencies]
-noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model", features = ["rnnoise", "deepfilternet"] }
+noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model" }
+# default features = ["rnnoise"] — fully offline
 ```
 
 ```rust
-let mut den = Denoiser::with_deepfilternet("./models")?;
-den.set_strength(0.9.into());
-den.process(&input, &mut output)?;
+use noise_cancellation::Denoiser;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut den = Denoiser::with_defaults()?; // works offline
+    let input = vec![0.0f32; 480 * 10];
+    let mut output = vec![0.0f32; input.len()];
+    den.process(&input, &mut output)?;
+    Ok(())
+}
 ```
+
+## Optional: DeepFilterNet3
+
+```toml
+noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model", features = ["rnnoise", "deepfilternet"] }
+```
+
+Place official graphs in `./models` (or set `NOISE_CANCEL_MODEL_DIR`):
+
+- `enc.onnx`, `erb_dec.onnx`, `df_dec.onnx`
+
+```rust
+let mut den = Denoiser::with_deepfilternet_auto()?; // local files only
+```
+
+CI downloads these once and caches them; the library never fetches them itself.
 
 ## CLI
 
 ```bash
+# RNNoise – no models needed
+cargo run --features cli --release --bin noise-cancel -- input.wav out.wav
+
+# DeepFilterNet3 – uses ./models if present
 cargo run --features "cli,deepfilternet" --release --bin noise-cancel -- \
-  input.wav out.wav --engine deepfilternet --model-dir ./models --strength 0.9
+  input.wav out.wav --engine deepfilternet --model-dir ./models
 ```
 
-## Remaining for full production
+## CI
 
-- [ ] C ABI header for audio-studio
-- [ ] Transparent resampling (non-48 kHz)
-- [ ] Automated parity tests vs official libDF
-- [ ] Multi-channel
+GitHub Actions (`.github/workflows/ci.yml`):
+
+- **RNNoise job** – build, example, tests – fully offline
+- **DeepFilterNet job** – builds with models cached by Actions
+- **Lint** – fmt + clippy
 
 ## License
 
 MIT OR Apache-2.0
+DeepFilterNet3 weights (when present) follow upstream MIT / Apache-2.0.
