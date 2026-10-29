@@ -125,36 +125,6 @@ impl ErbNorm {
             erb_db[b] -= self.mean[b];
         }
     }
-    fn flush(&mut self, output: &mut [f32]) -> Result<usize> {
-        if output.is_empty() || self.flush_remaining == 0 && self.flushing {
-            return Ok(0);
-        }
-        if !self.flushing {
-            self.flushing = true;
-            self.flush_remaining = self.latency_samples();
-            if !self.remainder.is_empty() {
-                let mut final_hop = [0.0f32; HOP_SIZE];
-                final_hop[..self.remainder.len()].copy_from_slice(&self.remainder);
-                self.stft.analyze_hop(&final_hop);
-                let mut spectrum = std::mem::take(&mut self.stft.spectrum);
-                self.enhance_spectrum(&mut spectrum);
-                self.stft.spectrum = spectrum;
-                let enhanced = self.stft.synthesize_hop();
-                self.output_queue.extend(enhanced);
-                self.remainder.clear();
-            }
-        }
-        let count = output.len().min(self.flush_remaining);
-        for sample in output.iter_mut().take(count) {
-            *sample = self.output_queue.pop_front().unwrap_or(0.0);
-        }
-        self.flush_remaining -= count;
-        if self.flush_remaining == 0 {
-            self.output_queue.clear();
-        }
-        Ok(count)
-    }
-
     fn reset(&mut self) {
         *self = Self::new();
     }
@@ -692,6 +662,36 @@ impl NoiseEngine for DeepFilterNetEngine {
         }
 
         Ok(())
+    }
+
+    fn flush(&mut self, output: &mut [f32]) -> Result<usize> {
+        if output.is_empty() || self.flush_remaining == 0 && self.flushing {
+            return Ok(0);
+        }
+        if !self.flushing {
+            self.flushing = true;
+            self.flush_remaining = self.latency_samples();
+            if !self.remainder.is_empty() {
+                let mut final_hop = [0.0f32; HOP_SIZE];
+                final_hop[..self.remainder.len()].copy_from_slice(&self.remainder);
+                self.stft.analyze_hop(&final_hop);
+                let mut spectrum = std::mem::take(&mut self.stft.spectrum);
+                self.enhance_spectrum(&mut spectrum);
+                self.stft.spectrum = spectrum;
+                let enhanced = self.stft.synthesize_hop();
+                self.output_queue.extend(enhanced);
+                self.remainder.clear();
+            }
+        }
+        let count = output.len().min(self.flush_remaining);
+        for sample in output.iter_mut().take(count) {
+            *sample = self.output_queue.pop_front().unwrap_or(0.0);
+        }
+        self.flush_remaining -= count;
+        if self.flush_remaining == 0 {
+            self.output_queue.clear();
+        }
+        Ok(count)
     }
 
     fn reset(&mut self) {
