@@ -71,3 +71,53 @@ fn wet_dry_mix_aligns_delayed_dry_signal_with_wet_output() {
             "wet/dry alignment mismatch at {i}: {} vs {expected}", output[i]);
     }
 }
+
+
+#[test]
+fn denoiser_flush_drains_latency_in_small_chunks_and_requires_reset() {
+    let mut den = Denoiser::new(DenoiserConfig {
+        wet_dry_mix: false,
+        ..Default::default()
+    }).unwrap();
+    let input = vec![0.12f32; FRAME_SIZE * 3 + 101];
+    let mut output = vec![0.0; input.len()];
+    den.process(&input, &mut output).unwrap();
+
+    let mut tail = Vec::new();
+    loop {
+        let mut chunk = vec![0.0; 73];
+        let count = den.flush(&mut chunk).unwrap();
+        tail.extend_from_slice(&chunk[..count]);
+        if count == 0 { break; }
+    }
+    assert_eq!(tail.len(), den.latency_samples());
+    assert!(tail.iter().all(|sample| sample.is_finite()));
+    assert!(den.process(&input[..1], &mut [0.0]).is_err());
+
+    den.reset();
+    den.process(&input[..1], &mut [0.0]).unwrap();
+}
+
+#[test]
+fn denoiser_flush_reports_host_rate_tail_length() {
+    for sample_rate in [16_000, 44_100, 96_000] {
+        let mut den = Denoiser::new(DenoiserConfig {
+            sample_rate,
+            wet_dry_mix: false,
+            ..Default::default()
+        }).unwrap();
+        let input = vec![0.05; 1001];
+        let mut output = vec![0.0; input.len()];
+        den.process(&input, &mut output).unwrap();
+
+        let mut tail = Vec::new();
+        loop {
+            let mut chunk = vec![0.0; 41];
+            let count = den.flush(&mut chunk).unwrap();
+            tail.extend_from_slice(&chunk[..count]);
+            if count == 0 { break; }
+        }
+        assert_eq!(tail.len(), den.latency_samples(), "sample rate {sample_rate}");
+        assert!(tail.iter().all(|sample| sample.is_finite()));
+    }
+}
