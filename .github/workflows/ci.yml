@@ -25,16 +25,18 @@ jobs:
         run: |
           cargo fmt --all
           cargo fmt --all -- --check
-      - name: Build (default = rnnoise)
+      - name: Build (default = rnnoise + deepfilternet)
         run: cargo build --release
       - name: Build with CLI + c-api
         run: cargo build --release --features "cli,c-api"
-      - name: Tests
-        run: cargo test --release --features rnnoise
+      - name: Build RNNoise-only (no default features)
+        run: cargo build --release --no-default-features --features rnnoise
+      - name: Tests (RNNoise)
+        run: cargo test --release --no-default-features --features rnnoise
       - name: Resample + multi-channel smoke
         run: |
-          cargo test --release --features rnnoise --test resample_smoke
-          cargo test --release --features rnnoise --test multi_channel_smoke
+          cargo test --release --no-default-features --features rnnoise --test resample_smoke
+          cargo test --release --no-default-features --features rnnoise --test multi_channel_smoke
 
   deepfilternet:
     name: DeepFilterNet3 (vendored models)
@@ -51,8 +53,10 @@ jobs:
           test -f models/erb_dec.onnx
           test -f models/df_dec.onnx
           ls -lh models/
-      - name: Build deepfilternet
-        run: cargo build --release --features deepfilternet
+      - name: Build deepfilternet-only
+        run: cargo build --release --no-default-features --features deepfilternet
+      - name: Build default (both engines)
+        run: cargo build --release
       - name: DeepFilterNet3 smoke tests
         run: cargo test --release --features deepfilternet --test dfn3_smoke
 
@@ -65,4 +69,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --features rnnoise -- -D warnings
+      - name: Clippy (default = both engines)
+        run: cargo clippy -- -D warnings
+      - name: Clippy (RNNoise-only)
+        run: cargo clippy --no-default-features --features rnnoise -- -D warnings
