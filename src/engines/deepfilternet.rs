@@ -25,8 +25,8 @@ pub const DF_ORDER: usize = 5;
 pub const DF_LOOKAHEAD: usize = 2;
 
 const ERB_WIDTHS: [usize; NB_ERB] = [
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 5, 5, 7, 7, 8, 10, 12, 13, 15, 18, 20,
-    24, 28, 31, 37, 42, 50, 56, 67,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 5, 5, 7, 7, 8, 10, 12, 13, 15, 18, 20, 24, 28, 31, 37,
+    42, 50, 56, 67,
 ];
 const NORM_ALPHA: f32 = 0.99;
 
@@ -183,10 +183,7 @@ impl Stft {
         }
     }
 
-    fn process_hop<F>(&mut self, hop: &[f32], process_spectrum: F) -> [f32; HOP_SIZE]
-    where
-        F: FnOnce(&mut [Complex<f32>]),
-    {
+    fn analyze_hop(&mut self, hop: &[f32]) {
         self.time_buf.copy_within(HOP_SIZE..FFT_SIZE, 0);
         self.time_buf[HOP_SIZE..].copy_from_slice(hop);
         for i in 0..FFT_SIZE {
@@ -195,7 +192,9 @@ impl Stft {
         self.forward
             .process(&mut self.framed, &mut self.spectrum)
             .expect("FFT forward");
-        process_spectrum(&mut self.spectrum);
+    }
+
+    fn synthesize_hop(&mut self) -> [f32; HOP_SIZE] {
         self.inverse
             .process(&mut self.spectrum, &mut self.time_out)
             .expect("FFT inverse");
@@ -258,6 +257,8 @@ impl DfHistory {
 }
 
 struct OnnxModels {
+    /// Kept alive for the lifetime of the sessions.
+    _env: ort::environment::Environment,
     ready: bool,
     combined: Option<ort::session::Session>,
     enc: Option<ort::session::Session>,
@@ -282,24 +283,31 @@ impl OnnxModels {
             )));
         }
 
-        // ort 2.x: Session::builder() without explicit Environment
-        let build = |path: &Path| -> Option<ort::session::Session> {
-            let b = ort::session::Session::builder().ok()?;
-            let b = b
-                .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
-                .ok()?;
-            let b = b.with_intra_threads(1).ok()?;
-            match b.commit_from_file(path) {
-                Ok(s) => {
-                    log::info!("DFN3 loaded: {}", path.display());
-                    Some(s)
-                }
-                Err(e) => {
-                    log::warn!("Failed {}: {e}", path.display());
-                    None
-                }
+        // ort 2.0.0-rc.15: Session::builder requires &Environment
+        let env = match ort::init().build() {
+            Ok(e) => e,
+            Err(e) => {
+                return Err(Error::Engine(format!("ort environment init failed: {e}")));
             }
         };
+        let build =
+            |path: &Path, env: &ort::environment::Environment| -> Option<ort::session::Session> {
+                let b = ort::session::Session::builder(env).ok()?;
+                let b = b
+                    .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+                    .ok()?;
+                let b = b.with_intra_threads(1).ok()?;
+                match b.commit_from_file(path) {
+                    Ok(s) => {
+                        log::info!("DFN3 loaded: {}", path.display());
+                        Some(s)
+                    }
+                    Err(e) => {
+                        log::warn!("Failed {}: {e}", path.display());
+                        None
+                    }
+                }
+            };
 
         let mut loaded = Vec::new();
         let mut combined = None;
@@ -313,27 +321,28 @@ impl OnnxModels {
             } else {
                 &combined2
             };
-            if let Some(s) = build(p) {
+            if let Some(s) = build(p, &env) {
                 loaded.push(p.clone());
                 combined = Some(s);
             }
         }
         if has_split {
-            if let Some(s) = build(&enc_path) {
+            if let Some(s) = build(&enc_path, &env) {
                 loaded.push(enc_path);
                 enc = Some(s);
             }
-            if let Some(s) = build(&erb_path) {
+            if let Some(s) = build(&erb_path, &env) {
                 loaded.push(erb_path);
                 erb_dec = Some(s);
             }
-            if let Some(s) = build(&df_path) {
+            if let Some(s) = build(&df_path, &env) {
                 loaded.push(df_path);
                 df_dec = Some(s);
             }
         }
 
         Ok(Self {
+            _env: env,
             ready: combined.is_some() || enc.is_some(),
             combined,
             enc,
@@ -416,7 +425,8 @@ impl DeepFilterNetEngine {
             self.spec_re[k] = spectrum.get(k).map(|c| c.re).unwrap_or(0.0);
             self.spec_im[k] = spectrum.get(k).map(|c| c.im).unwrap_or(0.0);
         }
-        self.spec_norm.normalize(&mut self.spec_re, &mut self.spec_im);
+        self.spec_norm
+            .normalize(&mut self.spec_re, &mut self.spec_im);
         self.df_hist.push(spectrum);
         self.mask = [1.0; NB_ERB];
         self.df_coefs.clear();
@@ -502,11 +512,9 @@ impl DeepFilterNetEngine {
             if !dec_in.is_empty() {
                 if let Ok(out) = erb_dec.run(dec_in) {
                     if let Some((_, v)) = out.iter().next() {
-                        if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                            if let Some(data) = arr.view().as_slice() {
-                                for (i, &x) in data.iter().take(NB_ERB).enumerate() {
-                                    self.mask[i] = x.clamp(0.0, 1.0);
-                                }
+                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                            for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                                self.mask[i] = x.clamp(0.0, 1.0);
                             }
                         }
                     }
@@ -524,10 +532,8 @@ impl DeepFilterNetEngine {
             if !dec_in.is_empty() {
                 if let Ok(out) = df_dec.run(dec_in) {
                     if let Some((_, v)) = out.iter().next() {
-                        if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                            if let Some(data) = arr.view().as_slice() {
-                                self.df_coefs.extend_from_slice(data);
-                            }
+                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                            self.df_coefs.extend_from_slice(data);
                         }
                     }
                 }
@@ -538,19 +544,15 @@ impl DeepFilterNetEngine {
 
     fn extract_outputs(&mut self, outputs: &ort::session::SessionOutputs) {
         if let Some(v) = outputs.get("erb_mask").or_else(|| outputs.get("m")) {
-            if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                if let Some(data) = arr.view().as_slice() {
-                    for (i, &x) in data.iter().take(NB_ERB).enumerate() {
-                        self.mask[i] = x.clamp(0.0, 1.0);
-                    }
+            if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                    self.mask[i] = x.clamp(0.0, 1.0);
                 }
             }
         }
         if let Some(v) = outputs.get("df_coefs").or_else(|| outputs.get("coefs")) {
-            if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                if let Some(data) = arr.view().as_slice() {
-                    self.df_coefs.extend_from_slice(data);
-                }
+            if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                self.df_coefs.extend_from_slice(data);
             }
         }
     }
@@ -573,9 +575,12 @@ impl NoiseEngine for DeepFilterNetEngine {
         let mut in_pos = 0;
         while in_pos + HOP_SIZE <= work.len() {
             let hop = &work[in_pos..in_pos + HOP_SIZE];
-            let enhanced = self.stft.process_hop(hop, |spectrum| {
-                self.enhance_spectrum(spectrum);
-            });
+            self.stft.analyze_hop(hop);
+            // Take spectrum out so enhance_spectrum can borrow the rest of self
+            let mut spectrum = std::mem::take(&mut self.stft.spectrum);
+            self.enhance_spectrum(&mut spectrum);
+            self.stft.spectrum = spectrum;
+            let enhanced = self.stft.synthesize_hop();
             let n = (output.len() - out_pos).min(HOP_SIZE);
             output[out_pos..out_pos + n].copy_from_slice(&enhanced[..n]);
             out_pos += n;
