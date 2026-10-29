@@ -8,9 +8,17 @@ RNNoise and DeepFilterNet3 ship together as a single algorithm family selectable
 | Engine | Quality | CPU cost | Latency | Status |
 |--------|---------|----------|---------|--------|
 | **RNNoise** | Very good | Extremely low | ~10 ms | Production ready |
-| **DeepFilterNet3** | Excellent | Moderate | ~20–40 ms | Streaming path + model loading ready |
+| **DeepFilterNet3** | Excellent | Moderate | ~20–40 ms | **STFT + spectral path live** (full neural next) |
 
-Both engines implement the same `NoiseEngine` trait and are used through the identical `Denoiser` interface. Switch engines without changing application code.
+Both engines implement the same `NoiseEngine` trait and are used through the identical `Denoiser` interface.
+
+## What’s new in 0.2.0
+
+- Real STFT / iSTFT (FFT 960, hop 480, Vorbis-style window)
+- Overlap-add streaming
+- Frequency-dependent spectral suppression on the DeepFilterNet3 path
+- Strength control affects the spectral engine
+- Unified algorithm surface unchanged – still one `Denoiser`
 
 ## Design
 
@@ -20,16 +28,9 @@ Application
     v
 Denoiser  (strength, wet/dry, reset, process)
     |
-    +-- RnnoiseEngine          (default, ultra-light)
-    +-- DeepFilterNetEngine    (high quality, ONNX)
+    +-- RnnoiseEngine           (default, ultra-light)
+    +-- DeepFilterNetEngine     (STFT → spectral suppress → iSTFT)
 ```
-
-- Real-time streaming (10 ms frames)
-- Offline batch processing
-- Strength + wet/dry mix
-- Embeddable (`cdylib` + `staticlib`) for C/C++ hosts (audio-studio, etc.)
-- Reasonable CPU – no GPU required
-- Local-first, MIT OR Apache-2.0
 
 ## Quick Start
 
@@ -37,17 +38,15 @@ Denoiser  (strength, wet/dry, reset, process)
 [dependencies]
 noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model", features = ["rnnoise"] }
 
-# Add high-quality engine:
+# High-quality engine:
 # features = ["rnnoise", "deepfilternet"]
 ```
 
 ```rust
-use noise_cancellation::{Denoiser, DenoiserConfig, Strength};
+use noise_cancellation::{Denoiser, Strength};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Default = RNNoise
     let mut den = Denoiser::with_defaults()?;
-
     let input  = vec![0.0f32; 480 * 100];
     let mut output = vec![0.0f32; input.len()];
     den.process(&input, &mut output)?;
@@ -55,24 +54,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Select DeepFilterNet3
+### DeepFilterNet3 path
 
 ```rust
 #[cfg(feature = "deepfilternet")]
 {
-    let mut den = Denoiser::with_deepfilternet("path/to/models")?;
-    // same process() / set_strength() / reset() API
+    let mut den = Denoiser::with_deepfilternet("./models")?;
+    den.set_strength(Strength(0.9));
+    den.process(&input, &mut output)?;
 }
 ```
 
-Place official ONNX files in the model directory:
-- `enc.onnx` + `erb_dec.onnx` + `df_dec.onnx`  
-  **or**
-- `deepfilter.onnx` / `dfn3.onnx`
+Model files (for future full neural inference):
+- `enc.onnx` + `erb_dec.onnx` + `df_dec.onnx` **or** `deepfilter.onnx` / `dfn3.onnx`
+- Download: https://github.com/Rikorose/DeepFilterNet → `models/DeepFilterNet3_onnx.tar.gz`
 
-Sources:
-- https://github.com/Rikorose/DeepFilterNet → `models/DeepFilterNet3_onnx.tar.gz`
-- Hugging Face mirrors
+Even without the neural weights fully connected, the STFT spectral path already performs real noise reduction.
 
 ## CLI
 
@@ -80,27 +77,21 @@ Sources:
 # RNNoise
 cargo run --features cli --release --bin noise-cancel -- input.wav out.wav --strength 0.9
 
-# DeepFilterNet3
+# DeepFilterNet3 spectral path
 cargo run --features "cli,deepfilternet" --release --bin noise-cancel -- \
-  input.wav out.wav --engine deepfilternet --model-dir ./models
+  input.wav out.wav --engine deepfilternet --model-dir ./models --strength 0.9
 ```
-
-## Integration
-
-The crate builds as `lib` + `cdylib` + `staticlib`.  
-One instance of `Denoiser` per continuous stream. Call `reset()` when switching recordings.
 
 ## Roadmap
 
 - [x] Unified Denoiser API
 - [x] RNNoise production engine
-- [x] DeepFilterNet3 model loading + streaming hop processing
-- [x] Runtime engine selection (same algorithm surface)
-- [ ] Complete DeepFilterNet3 STFT → ERB → deep-filter → iSTFT path
-- [ ] C ABI header for audio-studio / C++ hosts
+- [x] DeepFilterNet3 STFT / iSTFT / overlap-add streaming
+- [x] Spectral suppression path (audible enhancement)
+- [ ] Full neural ERB + deep-filter coefficient application via ONNX
+- [ ] C ABI for audio-studio / C++ hosts
 - [ ] Transparent resampling
-- [ ] Multi-channel
-- [ ] Plugin wrappers (VST3 / CLAP / LV2)
+- [ ] Multi-channel / plugin wrappers
 
 ## License
 
