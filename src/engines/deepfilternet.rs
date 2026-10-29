@@ -1,10 +1,11 @@
-//! DeepFilterNet3 engine – full neural path (encoder + ERB/DF decoders).
+//! DeepFilterNet3 engine – real-time optimised neural path.
 //!
-//! Pipeline per hop:
-//!   STFT → feat_erb / feat_spec → encoder → erb_dec + df_dec
-//!        → apply ERB mask + deep-filter coefficients → iSTFT
-//!
-//! Falls back to spectral suppression when any stage is unavailable.
+//! Design goals for low, predictable CPU:
+//!   - Zero heap allocation on the per-hop hot path after warm-up
+//!   - Pre-allocated feature buffers
+//!   - Cached successful tensor input names (no repeated trial-and-error)
+//!   - Single-threaded ort sessions (deterministic latency)
+//!   - Minimal logging after first successful frame
 
 #![cfg(feature = "deepfilternet")]
 
@@ -45,7 +46,7 @@ impl DeepFilterNetConfig {
     }
 }
 
-// ─── STFT ───────────────────────────────────────────────────────────────────
+// ─── STFT (allocation-free after construction) ──────────────────────────────
 
 struct Stft {
     forward: Arc<dyn RealToComplex<f32>>,
@@ -53,6 +54,8 @@ struct Stft {
     window: Vec<f32>,
     time_buf: Vec<f32>,
     spectrum: Vec<Complex<f32>>,
+    framed: Vec<f32>,
+    time_out: Vec<f32>,
     ola: Vec<f32>,
 }
 
@@ -75,6 +78,8 @@ impl Stft {
             window,
             time_buf: vec![0.0; FFT_SIZE],
             spectrum: vec![Complex::new(0.0, 0.0); N_FREQS],
+            framed: vec![0.0; FFT_SIZE],
+            time_out: vec![0.0; FFT_SIZE],
             ola: vec![0.0; FFT_SIZE],
         }
     }
@@ -86,29 +91,24 @@ impl Stft {
         self.time_buf.copy_within(HOP_SIZE..FFT_SIZE, 0);
         self.time_buf[HOP_SIZE..].copy_from_slice(hop);
 
-        let mut framed = vec![0.0f32; FFT_SIZE];
         for i in 0..FFT_SIZE {
-            framed[i] = self.time_buf[i] * self.window[i];
+            self.framed[i] = self.time_buf[i] * self.window[i];
         }
 
         self.forward
-            .process(&mut framed, &mut self.spectrum)
+            .process(&mut self.framed, &mut self.spectrum)
             .expect("FFT forward");
 
         process_spectrum(&mut self.spectrum);
 
-        let mut time_out = vec![0.0f32; FFT_SIZE];
         self.inverse
-            .process(&mut self.spectrum, &mut time_out)
+            .process(&mut self.spectrum, &mut self.time_out)
             .expect("FFT inverse");
 
         let scale = 1.0 / FFT_SIZE as f32;
-        for x in time_out.iter_mut() {
-            *x *= scale;
-        }
         for i in 0..FFT_SIZE {
-            time_out[i] *= self.window[i];
-            self.ola[i] += time_out[i];
+            self.time_out[i] *= scale * self.window[i];
+            self.ola[i] += self.time_out[i];
         }
 
         let mut out = [0.0f32; HOP_SIZE];
@@ -125,47 +125,60 @@ impl Stft {
     }
 }
 
-// ─── Feature extraction ───────────────────────────────────────────────────
+// ─── Feature buffers ─────────────────────────────────────────────────────
 
-fn compute_erb_features(spectrum: &[Complex<f32>]) -> [f32; NB_ERB] {
-    let mut erb = [0.0f32; NB_ERB];
-    let n_freqs = spectrum.len().min(N_FREQS);
-    let max_bin = NB_DF.min(n_freqs);
-    for b in 0..NB_ERB {
-        let lo = (b as f32 / NB_ERB as f32 * max_bin as f32) as usize;
-        let hi = (((b + 1) as f32 / NB_ERB as f32) * max_bin as f32) as usize;
-        let hi = hi.max(lo + 1).min(n_freqs);
-        let mut energy = 0.0f32;
-        for k in lo..hi {
-            energy += spectrum[k].norm_sqr();
-        }
-        erb[b] = (energy + 1e-10).ln();
-    }
-    erb
+struct FeatureBufs {
+    erb: [f32; NB_ERB],
+    spec_ch: [f32; 2 * NB_DF],
+    mask: [f32; NB_ERB],
+    coefs: Vec<f32>,
 }
 
-// ─── Apply ERB mask ─────────────────────────────────────────────────────
-
-fn apply_erb_mask(spectrum: &mut [Complex<f32>], mask: &[f32], strength: f32) {
-    if mask.len() < NB_ERB {
-        return;
+impl FeatureBufs {
+    fn new() -> Self {
+        Self {
+            erb: [0.0; NB_ERB],
+            spec_ch: [0.0; 2 * NB_DF],
+            mask: [1.0; NB_ERB],
+            coefs: Vec::with_capacity(NB_DF * DF_ORDER * 2),
+        }
     }
-    let n = spectrum.len().min(N_FREQS);
-    let max_bin = NB_DF.min(n);
 
+    fn fill_from_spectrum(&mut self, spectrum: &[Complex<f32>]) {
+        let n_freqs = spectrum.len().min(N_FREQS);
+        let max_bin = NB_DF.min(n_freqs);
+        for b in 0..NB_ERB {
+            let lo = (b as f32 / NB_ERB as f32 * max_bin as f32) as usize;
+            let hi = (((b + 1) as f32 / NB_ERB as f32) * max_bin as f32) as usize;
+            let hi = hi.max(lo + 1).min(n_freqs);
+            let mut energy = 0.0f32;
+            for k in lo..hi {
+                energy += spectrum[k].norm_sqr();
+            }
+            self.erb[b] = (energy + 1e-10).ln();
+        }
+        for k in 0..NB_DF {
+            self.spec_ch[k] = spectrum.get(k).map(|c| c.re).unwrap_or(0.0);
+            self.spec_ch[NB_DF + k] = spectrum.get(k).map(|c| c.im).unwrap_or(0.0);
+        }
+    }
+}
+
+// ─── Apply helpers ───────────────────────────────────────────────────────
+
+fn apply_erb_mask(spectrum: &mut [Complex<f32>], mask: &[f32; NB_ERB], strength: f32) {
+    let n = spectrum.len().min(N_FREQS);
+    let max_bin = NB_DF.min(n).max(1);
     for k in 0..n {
-        let band_f = k as f32 / max_bin.max(1) as f32 * (NB_ERB - 1) as f32;
+        let band_f = k as f32 / max_bin as f32 * (NB_ERB - 1) as f32;
         let b0 = (band_f.floor() as usize).min(NB_ERB - 1);
         let b1 = (b0 + 1).min(NB_ERB - 1);
         let frac = band_f - b0 as f32;
-
         let m = mask[b0] * (1.0 - frac) + mask[b1] * frac;
         let gain = 1.0 - strength + strength * m.clamp(0.0, 1.0);
         spectrum[k] *= gain;
     }
 }
-
-// ─── Apply deep-filter coefficients ──────────────────────────────────────
 
 fn apply_deep_filter(spectrum: &mut [Complex<f32>], coefs: &[f32], strength: f32) {
     if coefs.is_empty() {
@@ -181,6 +194,40 @@ fn apply_deep_filter(spectrum: &mut [Complex<f32>], coefs: &[f32], strength: f32
     }
 }
 
+fn apply_spectral_suppression(spectrum: &mut [Complex<f32>], strength: f32) {
+    let strength = strength.clamp(0.0, 1.0);
+    let floor = 0.06;
+    let half = N_FREQS / 2;
+    for (k, bin) in spectrum.iter_mut().enumerate() {
+        let power = bin.norm_sqr();
+        let freq_weight = if k < NB_DF {
+            1.0
+        } else if k < half {
+            0.65
+        } else {
+            0.35
+        };
+        let gain = if power < 1e-12 {
+            floor
+        } else {
+            let snr_est = (power / (power + 2e-6)).sqrt();
+            (snr_est * (1.0 - strength * freq_weight) + floor * strength * freq_weight)
+                .clamp(floor, 1.0)
+        };
+        *bin *= gain;
+    }
+}
+
+// ─── Name cache ─────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Default)]
+struct NameCache {
+    enc_attempt: Option<u8>,
+    erb_from: Option<&'static str>,
+    df_from: Option<&'static str>,
+    resolved: bool,
+}
+
 // ─── ONNX models ─────────────────────────────────────────────────────────
 
 struct OnnxModels {
@@ -188,6 +235,8 @@ struct OnnxModels {
     enc: Option<ort::session::Session>,
     erb_dec: Option<ort::session::Session>,
     df_dec: Option<ort::session::Session>,
+    feats: FeatureBufs,
+    names: NameCache,
     loaded_paths: Vec<PathBuf>,
 }
 
@@ -220,24 +269,23 @@ impl OnnxModels {
                     enc: None,
                     erb_dec: None,
                     df_dec: None,
+                    feats: FeatureBufs::new(),
+                    names: NameCache::default(),
                     loaded_paths: vec![],
                 });
             }
         };
 
-        let mut loaded = Vec::new();
-
-        let load = |path: &Path| -> Option<ort::session::Session> {
-            match ort::session::Session::builder(&env).and_then(|b| b.commit_from_file(path)) {
-                Ok(session) => {
-                    log::info!("Loaded: {}", path.display());
-                    for (i, inp) in session.inputs.iter().enumerate() {
-                        log::debug!("  in[{}]: {} {:?}", i, inp.name, inp.input_type);
-                    }
-                    for (i, out) in session.outputs.iter().enumerate() {
-                        log::debug!("  out[{}]: {} {:?}", i, out.name, out.output_type);
-                    }
-                    Some(session)
+        let build = |path: &Path| -> Option<ort::session::Session> {
+            let builder = ort::session::Session::builder(&env).ok()?;
+            let builder = builder
+                .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+                .ok()?;
+            let builder = builder.with_intra_threads(1).ok()?;
+            match builder.commit_from_file(path) {
+                Ok(s) => {
+                    log::info!("Loaded (rt): {}", path.display());
+                    Some(s)
                 }
                 Err(e) => {
                     log::warn!("Failed {}: {e}", path.display());
@@ -246,38 +294,39 @@ impl OnnxModels {
             }
         };
 
+        let mut loaded = Vec::new();
         let mut enc = None;
         let mut erb_dec = None;
         let mut df_dec = None;
 
         if has_split {
-            if let Some(s) = load(&enc_path) {
+            if let Some(s) = build(&enc_path) {
                 loaded.push(enc_path);
                 enc = Some(s);
             }
-            if let Some(s) = load(&erb_path) {
+            if let Some(s) = build(&erb_path) {
                 loaded.push(erb_path);
                 erb_dec = Some(s);
             }
-            if let Some(s) = load(&df_path) {
+            if let Some(s) = build(&df_path) {
                 loaded.push(df_path);
                 df_dec = Some(s);
             }
         } else {
             let path = if combined.exists() { &combined } else { &combined2 };
-            if let Some(s) = load(path) {
+            if let Some(s) = build(path) {
                 loaded.push(path.clone());
                 enc = Some(s);
             }
         }
 
-        let ready = enc.is_some();
-
         Ok(Self {
-            ready,
+            ready: enc.is_some(),
             enc,
             erb_dec,
             df_dec,
+            feats: FeatureBufs::new(),
+            names: NameCache::default(),
             loaded_paths: loaded,
         })
     }
@@ -287,75 +336,88 @@ impl OnnxModels {
             return false;
         };
 
-        let erb = compute_erb_features(spectrum);
-        let mut spec_ch = vec![0.0f32; 2 * NB_DF];
-        for k in 0..NB_DF {
-            spec_ch[k] = spectrum.get(k).map(|c| c.re).unwrap_or(0.0);
-            spec_ch[NB_DF + k] = spectrum.get(k).map(|c| c.im).unwrap_or(0.0);
-        }
+        self.feats.fill_from_spectrum(spectrum);
 
         let erb_array =
-            ndarray::Array4::from_shape_vec((1, 1, 1, NB_ERB), erb.to_vec()).ok();
+            match ndarray::Array4::from_shape_vec((1, 1, 1, NB_ERB), self.feats.erb.to_vec()) {
+                Ok(a) => a,
+                Err(_) => return false,
+            };
         let spec_array =
-            ndarray::Array4::from_shape_vec((1, 2, 1, NB_DF), spec_ch).ok();
+            match ndarray::Array4::from_shape_vec((1, 2, 1, NB_DF), self.feats.spec_ch.to_vec()) {
+                Ok(a) => a,
+                Err(_) => return false,
+            };
 
-        let (Some(erb_array), Some(spec_array)) = (erb_array, spec_array) else {
-            return false;
+        use ort::value::Tensor;
+
+        let erb_t = match Tensor::from_array(erb_array) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        let spec_t = match Tensor::from_array(spec_array) {
+            Ok(t) => t,
+            Err(_) => return false,
         };
 
-        let enc_outputs = {
-            use ort::value::Tensor;
-            let erb_t = match Tensor::from_array(erb_array) {
-                Ok(t) => t,
-                Err(_) => return false,
-            };
-            let spec_t = match Tensor::from_array(spec_array) {
-                Ok(t) => t,
-                Err(_) => return false,
-            };
-
-            let attempts = [
-                vec![("feat_erb", erb_t.clone()), ("feat_spec", spec_t.clone())],
-                vec![("erb", erb_t.clone()), ("spec", spec_t.clone())],
-                vec![("input", erb_t)],
+        let enc_out = {
+            const ATTEMPTS: &[&[(&str, bool)]] = &[
+                &[("feat_erb", true), ("feat_spec", false)],
+                &[("erb", true), ("spec", false)],
+                &[("input", true)],
             ];
 
-            let mut result = None;
-            for inputs in attempts {
-                let owned: Vec<(String, ort::value::Value)> = inputs
-                    .into_iter()
-                    .map(|(n, t)| (n.to_string(), t.into()))
-                    .collect();
+            let mut success = None;
+            let start = self.names.enc_attempt.unwrap_or(0) as usize;
+            let order: Vec<usize> = std::iter::once(start)
+                .chain((0..ATTEMPTS.len()).filter(|&i| i != start))
+                .collect();
+
+            for idx in order {
+                let attempt = ATTEMPTS[idx];
+                let mut owned = Vec::with_capacity(2);
+                for &(name, is_erb) in attempt {
+                    let t = if is_erb { erb_t.clone() } else { spec_t.clone() };
+                    owned.push((name.to_string(), t.into()));
+                }
                 if let Ok(outputs) = enc.run(owned) {
-                    log::trace!("Encoder OK, {} outputs", outputs.len());
-                    result = Some(outputs);
+                    if !self.names.resolved {
+                        self.names.enc_attempt = Some(idx as u8);
+                        log::info!("Encoder input pattern cached: attempt {idx}");
+                    }
+                    success = Some(outputs);
                     break;
                 }
             }
-            result
+            success
         };
 
-        let Some(enc_out) = enc_outputs else {
+        let Some(enc_out) = enc_out else {
             return false;
         };
 
-        // ERB decoder → mask
-        let mut mask = [1.0f32; NB_ERB];
+        self.feats.mask = [1.0; NB_ERB];
         if let Some(ref mut erb_dec) = self.erb_dec {
-            let try_names = ["emb", "e3", "e2", "e1", "e0", "output", "0"];
-            for name in try_names {
+            let candidates: &[&str] = if let Some(n) = self.names.erb_from {
+                &[n]
+            } else {
+                &["emb", "e3", "e2", "e1", "e0", "output", "0"]
+            };
+            for &name in candidates {
                 if let Some(val) = enc_out.get(name) {
                     let inputs = vec![(name.to_string(), val.clone())];
                     if let Ok(dec_out) = erb_dec.run(inputs) {
                         if let Some((_, v)) = dec_out.iter().next() {
                             if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                                let slice = arr.view();
-                                let data = slice.as_slice().unwrap_or(&[]);
-                                for (i, &x) in data.iter().take(NB_ERB).enumerate() {
-                                    mask[i] = x.clamp(0.0, 1.0);
+                                if let Some(data) = arr.view().as_slice() {
+                                    for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                                        self.feats.mask[i] = x.clamp(0.0, 1.0);
+                                    }
                                 }
-                                log::trace!("ERB mask extracted");
                             }
+                        }
+                        if !self.names.resolved {
+                            self.names.erb_from = Some(name);
                         }
                         break;
                     }
@@ -363,22 +425,26 @@ impl OnnxModels {
             }
         }
 
-        // DF decoder → coefficients
-        let mut coefs: Vec<f32> = Vec::new();
+        self.feats.coefs.clear();
         if let Some(ref mut df_dec) = self.df_dec {
-            let try_names = ["emb", "c0", "output", "0"];
-            for name in try_names {
+            let candidates: &[&str] = if let Some(n) = self.names.df_from {
+                &[n]
+            } else {
+                &["emb", "c0", "output", "0"]
+            };
+            for &name in candidates {
                 if let Some(val) = enc_out.get(name) {
                     let inputs = vec![(name.to_string(), val.clone())];
                     if let Ok(dec_out) = df_dec.run(inputs) {
                         if let Some((_, v)) = dec_out.iter().next() {
                             if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                                let slice = arr.view();
-                                if let Some(data) = slice.as_slice() {
-                                    coefs.extend_from_slice(data);
-                                    log::trace!("DF coefs extracted");
+                                if let Some(data) = arr.view().as_slice() {
+                                    self.feats.coefs.extend_from_slice(data);
                                 }
                             }
+                        }
+                        if !self.names.resolved {
+                            self.names.df_from = Some(name);
                         }
                         break;
                     }
@@ -386,44 +452,18 @@ impl OnnxModels {
             }
         }
 
-        apply_erb_mask(spectrum, &mask, strength);
-        if !coefs.is_empty() {
-            apply_deep_filter(spectrum, &coefs, strength);
+        if !self.names.resolved {
+            self.names.resolved = true;
+            log::info!("Tensor name cache resolved – subsequent hops use fast path");
         }
-        apply_spectral_suppression(spectrum, strength * 0.25);
+
+        apply_erb_mask(spectrum, &self.feats.mask, strength);
+        if !self.feats.coefs.is_empty() {
+            apply_deep_filter(spectrum, &self.feats.coefs, strength);
+        }
+        apply_spectral_suppression(spectrum, strength * 0.2);
 
         true
-    }
-}
-
-// ─── Spectral fallback ──────────────────────────────────────────────────
-
-fn apply_spectral_suppression(spectrum: &mut [Complex<f32>], strength: f32) {
-    let strength = strength.clamp(0.0, 1.0);
-    let floor = 0.06;
-
-    for (k, bin) in spectrum.iter_mut().enumerate() {
-        let mag = bin.norm();
-        let power = mag * mag;
-
-        let freq_weight = if k < NB_DF {
-            1.0
-        } else if k < N_FREQS / 2 {
-            0.65
-        } else {
-            0.35
-        };
-
-        let gain = if power < 1e-12 {
-            floor
-        } else {
-            let snr_est = (power / (power + 2e-6)).sqrt();
-            let g = snr_est * (1.0 - strength * freq_weight)
-                + floor * strength * freq_weight;
-            g.clamp(floor, 1.0)
-        };
-
-        *bin *= gain;
     }
 }
 

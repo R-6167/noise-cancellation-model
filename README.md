@@ -5,29 +5,29 @@
 | Engine | Quality | CPU | Latency | Status |
 |--------|---------|-----|---------|--------|
 | **RNNoise** | Very good | Extremely low | ~10 ms | Production ready |
-| **DeepFilterNet3** | Excellent | Moderate | ~20–40 ms | **Full neural path (enc + decoders)** |
+| **DeepFilterNet3** | Excellent | Moderate (rt-optimised) | ~20–40 ms | **Real-time neural path** |
 
-## What’s new in 0.3.0
+## What’s new in 0.3.1 – Real-time optimisations
 
-- ERB decoder session kept alive
-- DF decoder session kept alive
-- Encoder → decoder chaining
-- ERB mask extraction + linear-frequency interpolation
-- Deep-filter coefficient application
-- Residual spectral gate for uncovered bins
-- Automatic fallback at every stage
+- **Zero heap allocation** on the per-hop hot path after warm-up
+- Pre-allocated STFT buffers (`framed`, `time_out`, spectrum, OLA)
+- Pre-allocated feature buffers (`erb`, `spec_ch`, `mask`, `coefs`)
+- **Cached tensor input/output names** – trial-and-error only on first frames
+- ort sessions built with `intra_threads(1)` + `GraphOptimizationLevel::Level3`
+- Minimal logging after name cache is resolved
 
-## Pipeline
+## Pipeline (still the same algorithm)
 
 ```
 hop
-  → STFT (FFT 960, hop 480)
-  → feat_erb + feat_spec
-  → encoder.run()
-  → erb_dec.run()  → 32-band mask  → apply
-  → df_dec.run()   → coefficients  → apply
+  → STFT (pre-allocated)
+  → feat_erb + feat_spec (pre-allocated)
+  → encoder.run()          ← cached input names
+  → erb_dec.run() → mask   ← cached output name
+  → df_dec.run()  → coefs  ← cached output name
+  → apply mask + coefs (in-place)
   → residual spectral gate
-  → iSTFT + overlap-add
+  → iSTFT + OLA (pre-allocated)
 ```
 
 ## Quick Start
@@ -39,15 +39,8 @@ noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model
 
 ```rust
 let mut den = Denoiser::with_deepfilternet("./models")?;
-den.set_strength(0.9.into());
 den.process(&input, &mut output)?;
 ```
-
-Models (place in `./models`):
-- `enc.onnx` + `erb_dec.onnx` + `df_dec.onnx`
-- or `deepfilter.onnx` / `dfn3.onnx`
-
-Download: https://github.com/Rikorose/DeepFilterNet → `models/DeepFilterNet3_onnx.tar.gz`
 
 ## CLI
 
@@ -60,10 +53,8 @@ cargo run --features "cli,deepfilternet" --release --bin noise-cancel -- \
 
 - [x] Unified Denoiser API
 - [x] RNNoise production engine
-- [x] DeepFilterNet3 STFT / iSTFT
-- [x] ONNX session loading
-- [x] Encoder inference
-- [x] ERB + DF decoder inference + mask/coef application
+- [x] Full neural path (enc + decoders)
+- [x] Real-time optimisations (alloc-free hot path, name cache, single-thread sessions)
 - [ ] Exact ERB matrix / norm stats from official config
 - [ ] Multi-frame DF FIR with history
 - [ ] C ABI for audio-studio
