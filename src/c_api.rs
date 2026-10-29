@@ -536,4 +536,30 @@ mod overlap_tests {
         assert!(buffer[1..].iter().all(|sample| sample.is_finite()));
         unsafe { nc_destroy_multi(handle) };
     }
+    #[test]
+    fn non_finite_strength_is_rejected_by_c_api() {
+        let mut handle: *mut NcHandle = ptr::null_mut();
+        let status = unsafe {
+            nc_create(NcEngine::Rnnoise as i32, ptr::null(), f32::NAN, &mut handle)
+        };
+        assert_eq!(status, NcStatus::ErrInvalidArg as i32);
+        assert!(handle.is_null());
+
+        let status = unsafe {
+            nc_create(NcEngine::Rnnoise as i32, ptr::null(), 0.85, &mut handle)
+        };
+        assert_eq!(status, NcStatus::Ok as i32);
+        assert_eq!(
+            unsafe { nc_set_strength(handle, f32::NAN) },
+            NcStatus::ErrInvalidArg as i32
+        );
+        let mut strength = -1.0;
+        assert_eq!(
+            unsafe { nc_get_strength(handle, &mut strength) },
+            NcStatus::Ok as i32
+        );
+        assert!((strength - 0.85).abs() < 1e-6);
+        unsafe { nc_destroy(handle) };
+    }
+
 }
