@@ -1,8 +1,10 @@
 //! High-quality noise cancellation library.
 //!
 //! Dual-engine design:
-//! - **RNNoise** (default): ultra-lightweight, real-time friendly, pure Rust via `nnnoiseless`
-//! - **DeepFilterNet3** (optional feature): higher quality full-band suppression via ONNX Runtime
+//! - **RNNoise** (default): ultra-lightweight, real-time friendly, pure Rust via `nnnoiseless`.
+//!   Fully self-contained — weights are embedded; no files or network required.
+//! - **DeepFilterNet3** (optional feature): higher quality full-band suppression via ONNX Runtime.
+//!   Uses only local model files; the library never downloads anything at runtime.
 //!
 //! Designed for embedding into larger applications (audio studios, VoIP, DAWs, etc.).
 //! Processes 48 kHz mono f32 audio in 10 ms frames (480 samples).
@@ -18,7 +20,7 @@ pub mod utils;
 
 pub use error::{Error, Result};
 pub use processing::{Denoiser, DenoiserConfig, EngineKind, Strength};
-pub use utils::{AudioBufferPool, PooledBuffer};
+pub use utils::{AudioBufferPool, PooledBuffer, default_model_dir, find_model_dir, is_model_dir};
 
 /// Re-export of the common sample type used throughout the library.
 pub type Sample = f32;
