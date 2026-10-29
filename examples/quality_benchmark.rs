@@ -270,8 +270,12 @@ mod tests {
 
     #[test]
     fn best_lag_diagnostic_detects_a_delayed_copy() {
+        let mut state = 0x1234_5678u32;
         let clean: Vec<f32> = (0..4096)
-            .map(|i| ((i * 17 % 101) as f32 - 50.0) / 50.0)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                ((state >> 8) as f32 / 16_777_216.0) * 2.0 - 1.0
+            })
             .collect();
         let delay = 137usize;
         let mut delayed = vec![0.0f32; clean.len()];
