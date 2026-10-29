@@ -27,6 +27,9 @@ pub trait NoiseEngine: Send {
     /// returns an error until `reset` starts a new stream.
     fn flush(&mut self, output: &mut [f32]) -> crate::Result<usize>;
 
+    /// Set engine-internal suppression strength when supported.
+    fn set_strength(&mut self, _strength: f32) {}
+
     /// Reset internal state (call between unrelated streams).
     fn reset(&mut self);
 
