@@ -2,82 +2,51 @@
 
 **One library. Two engines. One clean API.**
 
-High-quality, embeddable noise suppression written in Rust.  
-RNNoise and DeepFilterNet3 ship together as a single algorithm family selectable at runtime.
-
-| Engine | Quality | CPU cost | Latency | Status |
-|--------|---------|----------|---------|--------|
+| Engine | Quality | CPU | Latency | Status |
+|--------|---------|-----|---------|--------|
 | **RNNoise** | Very good | Extremely low | ~10 ms | Production ready |
-| **DeepFilterNet3** | Excellent | Moderate | ~20–40 ms | **STFT + spectral path live** (full neural next) |
+| **DeepFilterNet3** | Excellent | Moderate | ~20–40 ms | **ONNX loading + STFT path live** |
 
-Both engines implement the same `NoiseEngine` trait and are used through the identical `Denoiser` interface.
+## What’s new in 0.2.1
 
-## What’s new in 0.2.0
-
-- Real STFT / iSTFT (FFT 960, hop 480, Vorbis-style window)
-- Overlap-add streaming
-- Frequency-dependent spectral suppression on the DeepFilterNet3 path
-- Strength control affects the spectral engine
-- Unified algorithm surface unchanged – still one `Denoiser`
+- Real `ort` environment + `Session::builder().commit_from_file()` loading
+- Validates enc.onnx / erb_dec.onnx / df_dec.onnx (or combined graph)
+- Graceful fallback to spectral path if ONNX init fails
+- Still one unified `Denoiser` for both engines
 
 ## Design
 
 ```
-Application
-    |
-    v
-Denoiser  (strength, wet/dry, reset, process)
-    |
-    +-- RnnoiseEngine           (default, ultra-light)
-    +-- DeepFilterNetEngine     (STFT → spectral suppress → iSTFT)
+Denoiser
+  +-- RnnoiseEngine
+  +-- DeepFilterNetEngine
+        +-- STFT / iSTFT (FFT 960, hop 480)
+        +-- ONNX sessions (enc + erb_dec + df_dec)
+        +-- Spectral fallback (always available)
 ```
 
 ## Quick Start
 
 ```toml
 [dependencies]
-noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model", features = ["rnnoise"] }
-
-# High-quality engine:
-# features = ["rnnoise", "deepfilternet"]
+noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model", features = ["rnnoise", "deepfilternet"] }
 ```
 
 ```rust
-use noise_cancellation::{Denoiser, Strength};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut den = Denoiser::with_defaults()?;
-    let input  = vec![0.0f32; 480 * 100];
-    let mut output = vec![0.0f32; input.len()];
-    den.process(&input, &mut output)?;
-    Ok(())
-}
+// High-quality path
+let mut den = Denoiser::with_deepfilternet("./models")?;
+den.process(&input, &mut output)?;
 ```
 
-### DeepFilterNet3 path
+Place models in `./models`:
+- `enc.onnx` + `erb_dec.onnx` + `df_dec.onnx`
+- or `deepfilter.onnx` / `dfn3.onnx`
 
-```rust
-#[cfg(feature = "deepfilternet")]
-{
-    let mut den = Denoiser::with_deepfilternet("./models")?;
-    den.set_strength(Strength(0.9));
-    den.process(&input, &mut output)?;
-}
-```
-
-Model files (for future full neural inference):
-- `enc.onnx` + `erb_dec.onnx` + `df_dec.onnx` **or** `deepfilter.onnx` / `dfn3.onnx`
-- Download: https://github.com/Rikorose/DeepFilterNet → `models/DeepFilterNet3_onnx.tar.gz`
-
-Even without the neural weights fully connected, the STFT spectral path already performs real noise reduction.
+Download: https://github.com/Rikorose/DeepFilterNet → `models/DeepFilterNet3_onnx.tar.gz`
 
 ## CLI
 
 ```bash
-# RNNoise
-cargo run --features cli --release --bin noise-cancel -- input.wav out.wav --strength 0.9
-
-# DeepFilterNet3 spectral path
 cargo run --features "cli,deepfilternet" --release --bin noise-cancel -- \
   input.wav out.wav --engine deepfilternet --model-dir ./models --strength 0.9
 ```
@@ -86,12 +55,11 @@ cargo run --features "cli,deepfilternet" --release --bin noise-cancel -- \
 
 - [x] Unified Denoiser API
 - [x] RNNoise production engine
-- [x] DeepFilterNet3 STFT / iSTFT / overlap-add streaming
-- [x] Spectral suppression path (audible enhancement)
-- [ ] Full neural ERB + deep-filter coefficient application via ONNX
-- [ ] C ABI for audio-studio / C++ hosts
-- [ ] Transparent resampling
-- [ ] Multi-channel / plugin wrappers
+- [x] DeepFilterNet3 STFT / iSTFT
+- [x] ONNX model discovery + session loading via ort
+- [ ] Full neural ERB feature extraction + mask/coefficient application
+- [ ] C ABI for audio-studio
+- [ ] Resampling / multi-channel / plugins
 
 ## License
 
