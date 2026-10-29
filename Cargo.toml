@@ -1,6 +1,6 @@
 [package]
 name = "noise_cancellation"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "High-quality real-time and offline noise cancellation library (DeepFilterNet3 + RNNoise)"
 license = "MIT OR Apache-2.0"
@@ -8,12 +8,13 @@ repository = "https://github.com/R-6167/noise-cancellation-model"
 keywords = ["audio", "noise-suppression", "speech-enhancement", "deepfilternet", "rnnoise"]
 categories = ["multimedia::audio", "science"]
 readme = "README.md"
+include = ["src/**/*", "include/**/*", "models/**/*", "examples/**/*", "tests/**/*", "scripts/**/*", "Cargo.toml", "README.md", "LICENSE*"]
 
 [features]
 default = ["rnnoise"]
 rnnoise = ["dep:nnnoiseless"]
 deepfilternet = ["dep:ort", "dep:ndarray", "dep:realfft", "dep:rustfft"]
-c-api = []
+c-api = []  # enables include/noise_cancellation.h FFI
 cli = ["dep:clap", "dep:hound", "rnnoise"]
 
 [dependencies]

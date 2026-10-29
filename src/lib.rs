@@ -6,6 +6,8 @@
 //! - **DeepFilterNet3** (optional feature): higher quality full-band suppression via ONNX Runtime.
 //!   Uses only local model files; the library never downloads anything at runtime.
 //!
+//! C ABI: enable feature `c-api` and include `include/noise_cancellation.h`.
+//!
 //! Designed for embedding into larger applications (audio studios, VoIP, DAWs, etc.).
 //! Processes 48 kHz mono f32 audio in 10 ms frames (480 samples).
 
@@ -17,6 +19,9 @@ pub mod engines;
 pub mod processing;
 pub mod error;
 pub mod utils;
+
+#[cfg(feature = "c-api")]
+pub mod c_api;
 
 pub use error::{Error, Result};
 pub use processing::{Denoiser, DenoiserConfig, EngineKind, Strength};
