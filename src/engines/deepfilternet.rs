@@ -263,7 +263,7 @@ struct OnnxModels {
     erb_dec: Option<ort::session::Session>,
     df_dec: Option<ort::session::Session>,
     loaded_paths: Vec<PathBuf>,
-    _env: ort::Environment,
+    _env: ort::environment::Environment,
 }
 
 impl OnnxModels {
@@ -285,16 +285,7 @@ impl OnnxModels {
         let env = match ort::init().build() {
             Ok(e) => e,
             Err(e) => {
-                log::warn!("Failed to create ort Environment: {e}");
-                return Ok(Self {
-                    ready: false,
-                    combined: None,
-                    enc: None,
-                    erb_dec: None,
-                    df_dec: None,
-                    loaded_paths: Vec::new(),
-                    _env: ort::init().build().expect("env"),
-                });
+                return Err(Error::Engine(format!("ort environment init failed: {e}")));
             }
         };
         let build = |path: &Path| -> Option<ort::session::Session> {
