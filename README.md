@@ -151,9 +151,25 @@ cargo run --release --features cli --example quality_benchmark -- clean.wav nois
 
 The benchmark reports input SNR and each engine's output SNR plus the change relative to the noisy input. These are measurements for that specific pair, not a universal quality claim; listen for artifacts and speech distortion as well. Do not compare files that differ in alignment, timing, or sample rate. If an output directory is supplied, it writes `rnnoise.wav` and `deepfilternet.wav` there for direct listening comparison, and refuses to overwrite either existing file.
 
-## CLI
+## CLI engine preference
+
+The CLI defaults to **RNNoise** unless the user has saved a preference. Choose an engine for one run with `--engine`, or persist that choice with `--remember-engine`:
 
 ```bash
+# Use DeepFilterNet3 for this run and remember it for future runs
+cargo run --features cli --release --bin noise-cancel -- input.wav out.wav --engine deepfilternet --remember-engine
+
+# Future runs use the saved preference (DeepFilterNet3 in this example)
+cargo run --features cli --release --bin noise-cancel -- input.wav out.wav
+
+# Override the saved preference for one run without changing it
+cargo run --features cli --release --bin noise-cancel -- input.wav out.wav --engine rnnoise
+```
+
+To change the saved preference, run the command again with the new `--engine` and `--remember-engine` flags. The preference is stored in the user's standard configuration directory (Windows: `%APPDATA%\\noise-cancellation-model\\engine`; macOS: `~/Library/Application Support/noise-cancellation-model/engine`; Linux: `$XDG_CONFIG_HOME/noise-cancellation-model/engine` or `~/.config/noise-cancellation-model/engine`). The preference is only saved after the selected engine initializes successfully. If no preference exists, RNNoise remains the default.
+
+```bash
+# Basic usage; uses the saved preference or RNNoise
 cargo run --features cli --release --bin noise-cancel -- input.wav out.wav
 ```
 
