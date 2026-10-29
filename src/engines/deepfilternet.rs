@@ -39,7 +39,11 @@ pub struct DeepFilterNetConfig {
 
 impl DeepFilterNetConfig {
     pub fn new(model_dir: impl Into<PathBuf>) -> Self {
-        Self { model_dir: model_dir.into(), atten_lim_db: None, compensate_delay: true }
+        Self {
+            model_dir: model_dir.into(),
+            atten_lim_db: None,
+            compensate_delay: true,
+        }
     }
 }
 
@@ -70,7 +74,9 @@ impl ErbBank {
         let mut out = [0.0f32; NB_ERB];
         for b in 0..NB_ERB {
             let mut e = 0.0f32;
-            for k in 0..N_FREQS { e += power[k] * self.fwd[b][k]; }
+            for k in 0..N_FREQS {
+                e += power[k] * self.fwd[b][k];
+            }
             out[b] = e;
         }
         out
@@ -80,19 +86,29 @@ impl ErbBank {
         let mut g = [0.0f32; N_FREQS];
         for k in 0..N_FREQS {
             let mut v = 0.0f32;
-            for b in 0..NB_ERB { v += mask[b] * self.inv[k][b]; }
+            for b in 0..NB_ERB {
+                v += mask[b] * self.inv[k][b];
+            }
             g[k] = v.clamp(0.0, 1.0);
         }
         g
     }
 }
 
-struct ErbNorm { mean: [f32; NB_ERB], alpha: f32 }
+struct ErbNorm {
+    mean: [f32; NB_ERB],
+    alpha: f32,
+}
 impl ErbNorm {
     fn new() -> Self {
         let mut mean = [0.0f32; NB_ERB];
-        for b in 0..NB_ERB { mean[b] = -60.0 - 30.0 * (b as f32 / (NB_ERB - 1) as f32); }
-        Self { mean, alpha: NORM_ALPHA }
+        for b in 0..NB_ERB {
+            mean[b] = -60.0 - 30.0 * (b as f32 / (NB_ERB - 1) as f32);
+        }
+        Self {
+            mean,
+            alpha: NORM_ALPHA,
+        }
     }
     fn normalize(&mut self, erb_db: &mut [f32; NB_ERB]) {
         for b in 0..NB_ERB {
@@ -100,25 +116,38 @@ impl ErbNorm {
             erb_db[b] -= self.mean[b];
         }
     }
-    fn reset(&mut self) { *self = Self::new(); }
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
 }
 
-struct SpecNorm { state: [f32; NB_DF], alpha: f32 }
+struct SpecNorm {
+    state: [f32; NB_DF],
+    alpha: f32,
+}
 impl SpecNorm {
     fn new() -> Self {
         let mut state = [0.0f32; NB_DF];
-        for k in 0..NB_DF { state[k] = 0.001 - 0.0009 * (k as f32 / (NB_DF - 1) as f32); }
-        Self { state, alpha: NORM_ALPHA }
+        for k in 0..NB_DF {
+            state[k] = 0.001 - 0.0009 * (k as f32 / (NB_DF - 1) as f32);
+        }
+        Self {
+            state,
+            alpha: NORM_ALPHA,
+        }
     }
     fn normalize(&mut self, re: &mut [f32; NB_DF], im: &mut [f32; NB_DF]) {
         for k in 0..NB_DF {
             let e = re[k] * re[k] + im[k] * im[k];
             self.state[k] = self.alpha * self.state[k] + (1.0 - self.alpha) * e;
             let s = (self.state[k] + 1e-12).sqrt();
-            re[k] /= s; im[k] /= s;
+            re[k] /= s;
+            im[k] /= s;
         }
     }
-    fn reset(&mut self) { *self = Self::new(); }
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
 }
 
 struct Stft {
@@ -143,7 +172,9 @@ impl Stft {
             window[n] = (std::f32::consts::FRAC_PI_2 * x.sin().powi(2)).sin();
         }
         Self {
-            forward, inverse, window,
+            forward,
+            inverse,
+            window,
             time_buf: vec![0.0; FFT_SIZE],
             spectrum: vec![Complex::new(0.0, 0.0); N_FREQS],
             framed: vec![0.0; FFT_SIZE],
@@ -153,13 +184,21 @@ impl Stft {
     }
 
     fn process_hop<F>(&mut self, hop: &[f32], process_spectrum: F) -> [f32; HOP_SIZE]
-    where F: FnOnce(&mut [Complex<f32>]) {
+    where
+        F: FnOnce(&mut [Complex<f32>]),
+    {
         self.time_buf.copy_within(HOP_SIZE..FFT_SIZE, 0);
         self.time_buf[HOP_SIZE..].copy_from_slice(hop);
-        for i in 0..FFT_SIZE { self.framed[i] = self.time_buf[i] * self.window[i]; }
-        self.forward.process(&mut self.framed, &mut self.spectrum).expect("FFT forward");
+        for i in 0..FFT_SIZE {
+            self.framed[i] = self.time_buf[i] * self.window[i];
+        }
+        self.forward
+            .process(&mut self.framed, &mut self.spectrum)
+            .expect("FFT forward");
         process_spectrum(&mut self.spectrum);
-        self.inverse.process(&mut self.spectrum, &mut self.time_out).expect("FFT inverse");
+        self.inverse
+            .process(&mut self.spectrum, &mut self.time_out)
+            .expect("FFT inverse");
         let scale = 1.0 / FFT_SIZE as f32;
         for i in 0..FFT_SIZE {
             self.time_out[i] *= scale * self.window[i];
@@ -179,17 +218,25 @@ impl Stft {
     }
 }
 
-struct DfHistory { frames: VecDeque<[Complex<f32>; NB_DF]> }
+struct DfHistory {
+    frames: VecDeque<[Complex<f32>; NB_DF]>,
+}
 impl DfHistory {
     fn new() -> Self {
         let mut frames = VecDeque::with_capacity(DF_ORDER + DF_LOOKAHEAD);
-        for _ in 0..DF_ORDER { frames.push_back([Complex::new(0.0, 0.0); NB_DF]); }
+        for _ in 0..DF_ORDER {
+            frames.push_back([Complex::new(0.0, 0.0); NB_DF]);
+        }
         Self { frames }
     }
     fn push(&mut self, spectrum: &[Complex<f32>]) {
         let mut frame = [Complex::new(0.0, 0.0); NB_DF];
-        for k in 0..NB_DF { frame[k] = spectrum.get(k).copied().unwrap_or(Complex::new(0.0, 0.0)); }
-        if self.frames.len() >= DF_ORDER { self.frames.pop_front(); }
+        for k in 0..NB_DF {
+            frame[k] = spectrum.get(k).copied().unwrap_or(Complex::new(0.0, 0.0));
+        }
+        if self.frames.len() >= DF_ORDER {
+            self.frames.pop_front();
+        }
         self.frames.push_back(frame);
     }
     fn apply(&self, coefs: &[f32], out: &mut [Complex<f32>]) {
@@ -205,7 +252,9 @@ impl DfHistory {
             out[k] = acc;
         }
     }
-    fn reset(&mut self) { *self = Self::new(); }
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
 }
 
 struct OnnxModels {
@@ -227,39 +276,71 @@ impl OnnxModels {
         let has_combined = combined_path.exists() || combined2.exists();
         let has_split = enc_path.exists() && erb_path.exists() && df_path.exists();
         if !has_combined && !has_split {
-            return Err(Error::Engine(format!("No DeepFilterNet3 ONNX in {}", model_dir.display())));
+            return Err(Error::Engine(format!(
+                "No DeepFilterNet3 ONNX in {}",
+                model_dir.display()
+            )));
         }
-        let env = match ort::init().commit() {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("ort init failed: {e}");
-                return Ok(Self { ready: false, combined: None, enc: None, erb_dec: None, df_dec: None, loaded_paths: vec![] });
-            }
-        };
+
+        // ort 2.x: Session::builder() without explicit Environment
         let build = |path: &Path| -> Option<ort::session::Session> {
-            let b = ort::session::Session::builder(&env).ok()?;
-            let b = b.with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3).ok()?;
+            let b = ort::session::Session::builder().ok()?;
+            let b = b
+                .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
+                .ok()?;
             let b = b.with_intra_threads(1).ok()?;
             match b.commit_from_file(path) {
-                Ok(s) => { log::info!("DFN3 loaded: {}", path.display()); Some(s) }
-                Err(e) => { log::warn!("Failed {}: {e}", path.display()); None }
+                Ok(s) => {
+                    log::info!("DFN3 loaded: {}", path.display());
+                    Some(s)
+                }
+                Err(e) => {
+                    log::warn!("Failed {}: {e}", path.display());
+                    None
+                }
             }
         };
+
         let mut loaded = Vec::new();
         let mut combined = None;
         let mut enc = None;
         let mut erb_dec = None;
         let mut df_dec = None;
+
         if has_combined {
-            let p = if combined_path.exists() { &combined_path } else { &combined2 };
-            if let Some(s) = build(p) { loaded.push(p.clone()); combined = Some(s); }
+            let p = if combined_path.exists() {
+                &combined_path
+            } else {
+                &combined2
+            };
+            if let Some(s) = build(p) {
+                loaded.push(p.clone());
+                combined = Some(s);
+            }
         }
         if has_split {
-            if let Some(s) = build(&enc_path) { loaded.push(enc_path); enc = Some(s); }
-            if let Some(s) = build(&erb_path) { loaded.push(erb_path); erb_dec = Some(s); }
-            if let Some(s) = build(&df_path) { loaded.push(df_path); df_dec = Some(s); }
+            if let Some(s) = build(&enc_path) {
+                loaded.push(enc_path);
+                enc = Some(s);
+            }
+            if let Some(s) = build(&erb_path) {
+                loaded.push(erb_path);
+                erb_dec = Some(s);
+            }
+            if let Some(s) = build(&df_path) {
+                loaded.push(df_path);
+                df_dec = Some(s);
+            }
         }
-        Ok(Self { ready: combined.is_some() || enc.is_some(), combined, enc, erb_dec, df_dec, loaded_paths: loaded })
+
+        Ok(Self {
+            ready: combined.is_some() || enc.is_some(),
+            combined,
+            enc,
+            erb_dec,
+            df_dec,
+            loaded_paths: loaded,
+        })
     }
 }
 
@@ -287,12 +368,23 @@ impl DeepFilterNetEngine {
     pub fn new(config: DeepFilterNetConfig) -> Result<Self> {
         let onnx = OnnxModels::try_load(&config.model_dir)?;
         Ok(Self {
-            config, stft: Stft::new(), erb: ErbBank::new(), erb_norm: ErbNorm::new(),
-            spec_norm: SpecNorm::new(), df_hist: DfHistory::new(), onnx,
-            pool: AudioBufferPool::for_streaming(), remainder: Vec::with_capacity(HOP_SIZE * 2),
-            strength: 0.85, power: [0.0; N_FREQS], erb_feat: [0.0; NB_ERB],
-            spec_re: [0.0; NB_DF], spec_im: [0.0; NB_DF], mask: [1.0; NB_ERB],
-            lin_gain: [1.0; N_FREQS], df_coefs: Vec::with_capacity(DF_ORDER * NB_DF * 2),
+            config,
+            stft: Stft::new(),
+            erb: ErbBank::new(),
+            erb_norm: ErbNorm::new(),
+            spec_norm: SpecNorm::new(),
+            df_hist: DfHistory::new(),
+            onnx,
+            pool: AudioBufferPool::for_streaming(),
+            remainder: Vec::with_capacity(HOP_SIZE * 2),
+            strength: 0.85,
+            power: [0.0; N_FREQS],
+            erb_feat: [0.0; NB_ERB],
+            spec_re: [0.0; NB_DF],
+            spec_im: [0.0; NB_DF],
+            mask: [1.0; NB_ERB],
+            lin_gain: [1.0; N_FREQS],
+            df_coefs: Vec::with_capacity(DF_ORDER * NB_DF * 2),
         })
     }
 
@@ -300,15 +392,25 @@ impl DeepFilterNetEngine {
         Self::new(DeepFilterNetConfig::new(model_dir.as_ref()))
     }
 
-    pub fn set_strength(&mut self, s: f32) { self.strength = s.clamp(0.0, 1.0); }
-    pub fn models_ready(&self) -> bool { self.onnx.ready }
-    pub fn loaded_model_paths(&self) -> &[PathBuf] { &self.onnx.loaded_paths }
+    pub fn set_strength(&mut self, s: f32) {
+        self.strength = s.clamp(0.0, 1.0);
+    }
+    pub fn models_ready(&self) -> bool {
+        self.onnx.ready
+    }
+    pub fn loaded_model_paths(&self) -> &[PathBuf] {
+        &self.onnx.loaded_paths
+    }
 
     fn enhance_spectrum(&mut self, spectrum: &mut [Complex<f32>]) {
         let strength = self.strength;
-        for k in 0..N_FREQS.min(spectrum.len()) { self.power[k] = spectrum[k].norm_sqr(); }
+        for k in 0..N_FREQS.min(spectrum.len()) {
+            self.power[k] = spectrum[k].norm_sqr();
+        }
         let erb_e = self.erb.analyze(&self.power);
-        for b in 0..NB_ERB { self.erb_feat[b] = 10.0 * (erb_e[b] + 1e-10).log10(); }
+        for b in 0..NB_ERB {
+            self.erb_feat[b] = 10.0 * (erb_e[b] + 1e-10).log10();
+        }
         self.erb_norm.normalize(&mut self.erb_feat);
         for k in 0..NB_DF {
             self.spec_re[k] = spectrum.get(k).map(|c| c.re).unwrap_or(0.0);
@@ -319,14 +421,21 @@ impl DeepFilterNetEngine {
         self.mask = [1.0; NB_ERB];
         self.df_coefs.clear();
         let neural_ok = self.run_neural();
-        if neural_ok { self.lin_gain = self.erb.synthesize_mask(&self.mask); }
-        else { self.lin_gain = [1.0; N_FREQS]; }
+        if neural_ok {
+            self.lin_gain = self.erb.synthesize_mask(&self.mask);
+        } else {
+            self.lin_gain = [1.0; N_FREQS];
+        }
         if let Some(lim_db) = self.config.atten_lim_db {
             let floor = 10f32.powf(-lim_db.abs() / 20.0);
-            for g in self.lin_gain.iter_mut() { *g = g.max(floor); }
+            for g in self.lin_gain.iter_mut() {
+                *g = g.max(floor);
+            }
         }
         let mut df_out = [Complex::new(0.0, 0.0); NB_DF];
-        if neural_ok && !self.df_coefs.is_empty() { self.df_hist.apply(&self.df_coefs, &mut df_out); }
+        if neural_ok && !self.df_coefs.is_empty() {
+            self.df_hist.apply(&self.df_coefs, &mut df_out);
+        }
         for k in 0..spectrum.len().min(N_FREQS) {
             if k < NB_DF && neural_ok && !self.df_coefs.is_empty() {
                 spectrum[k] = spectrum[k] * (1.0 - strength) + df_out[k] * strength;
@@ -337,38 +446,67 @@ impl DeepFilterNetEngine {
     }
 
     fn run_neural(&mut self) -> bool {
-        let erb_array = match ndarray::Array4::from_shape_vec((1, 1, 1, NB_ERB), self.erb_feat.to_vec()) {
-            Ok(a) => a, Err(_) => return false,
-        };
+        let erb_array =
+            match ndarray::Array4::from_shape_vec((1, 1, 1, NB_ERB), self.erb_feat.to_vec()) {
+                Ok(a) => a,
+                Err(_) => return false,
+            };
         let mut spec_ch = vec![0.0f32; 2 * NB_DF];
-        for k in 0..NB_DF { spec_ch[k] = self.spec_re[k]; spec_ch[NB_DF + k] = self.spec_im[k]; }
+        for k in 0..NB_DF {
+            spec_ch[k] = self.spec_re[k];
+            spec_ch[NB_DF + k] = self.spec_im[k];
+        }
         let spec_array = match ndarray::Array4::from_shape_vec((1, 2, 1, NB_DF), spec_ch) {
-            Ok(a) => a, Err(_) => return false,
+            Ok(a) => a,
+            Err(_) => return false,
         };
         use ort::value::Tensor;
-        let erb_t = match Tensor::from_array(erb_array) { Ok(t) => t, Err(_) => return false };
-        let spec_t = match Tensor::from_array(spec_array) { Ok(t) => t, Err(_) => return false };
+        let erb_t = match Tensor::from_array(erb_array) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+        let spec_t = match Tensor::from_array(spec_array) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
 
         if let Some(ref mut session) = self.onnx.combined {
-            let inputs = vec![("feat_erb".to_string(), erb_t.clone().into()), ("feat_spec".to_string(), spec_t.clone().into())];
-            if let Ok(outputs) = session.run(inputs) { self.extract_outputs(&outputs); return true; }
+            let inputs = vec![
+                ("feat_erb".to_string(), erb_t.clone().into()),
+                ("feat_spec".to_string(), spec_t.clone().into()),
+            ];
+            if let Ok(outputs) = session.run(inputs) {
+                self.extract_outputs(&outputs);
+                return true;
+            }
         }
 
-        let Some(ref mut enc) = self.onnx.enc else { return false; };
-        let inputs = vec![("feat_erb".to_string(), erb_t.into()), ("feat_spec".to_string(), spec_t.into())];
-        let Ok(enc_out) = enc.run(inputs) else { return false; };
+        let Some(ref mut enc) = self.onnx.enc else {
+            return false;
+        };
+        let inputs = vec![
+            ("feat_erb".to_string(), erb_t.into()),
+            ("feat_spec".to_string(), spec_t.into()),
+        ];
+        let Ok(enc_out) = enc.run(inputs) else {
+            return false;
+        };
 
         if let Some(ref mut erb_dec) = self.onnx.erb_dec {
             let mut dec_in = Vec::new();
             for n in ["emb", "e3", "e2", "e1", "e0"] {
-                if let Some(v) = enc_out.get(n) { dec_in.push((n.to_string(), v.clone())); }
+                if let Some(v) = enc_out.get(n) {
+                    dec_in.push((n.to_string(), v.clone()));
+                }
             }
             if !dec_in.is_empty() {
                 if let Ok(out) = erb_dec.run(dec_in) {
                     if let Some((_, v)) = out.iter().next() {
                         if let Ok(arr) = v.try_extract_tensor::<f32>() {
                             if let Some(data) = arr.view().as_slice() {
-                                for (i, &x) in data.iter().take(NB_ERB).enumerate() { self.mask[i] = x.clamp(0.0, 1.0); }
+                                for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                                    self.mask[i] = x.clamp(0.0, 1.0);
+                                }
                             }
                         }
                     }
@@ -379,13 +517,17 @@ impl DeepFilterNetEngine {
         if let Some(ref mut df_dec) = self.onnx.df_dec {
             let mut dec_in = Vec::new();
             for n in ["emb", "c0"] {
-                if let Some(v) = enc_out.get(n) { dec_in.push((n.to_string(), v.clone())); }
+                if let Some(v) = enc_out.get(n) {
+                    dec_in.push((n.to_string(), v.clone()));
+                }
             }
             if !dec_in.is_empty() {
                 if let Ok(out) = df_dec.run(dec_in) {
                     if let Some((_, v)) = out.iter().next() {
                         if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                            if let Some(data) = arr.view().as_slice() { self.df_coefs.extend_from_slice(data); }
+                            if let Some(data) = arr.view().as_slice() {
+                                self.df_coefs.extend_from_slice(data);
+                            }
                         }
                     }
                 }
@@ -398,13 +540,17 @@ impl DeepFilterNetEngine {
         if let Some(v) = outputs.get("erb_mask").or_else(|| outputs.get("m")) {
             if let Ok(arr) = v.try_extract_tensor::<f32>() {
                 if let Some(data) = arr.view().as_slice() {
-                    for (i, &x) in data.iter().take(NB_ERB).enumerate() { self.mask[i] = x.clamp(0.0, 1.0); }
+                    for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                        self.mask[i] = x.clamp(0.0, 1.0);
+                    }
                 }
             }
         }
         if let Some(v) = outputs.get("df_coefs").or_else(|| outputs.get("coefs")) {
             if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                if let Some(data) = arr.view().as_slice() { self.df_coefs.extend_from_slice(data); }
+                if let Some(data) = arr.view().as_slice() {
+                    self.df_coefs.extend_from_slice(data);
+                }
             }
         }
     }
@@ -413,9 +559,13 @@ impl DeepFilterNetEngine {
 impl NoiseEngine for DeepFilterNetEngine {
     fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
         if input.len() != output.len() {
-            return Err(Error::InvalidConfig("input and output buffers must have the same length".into()));
+            return Err(Error::InvalidConfig(
+                "input and output buffers must have the same length".into(),
+            ));
         }
-        let mut work = self.pool.acquire(self.remainder.len() + input.len() + HOP_SIZE);
+        let mut work = self
+            .pool
+            .acquire(self.remainder.len() + input.len() + HOP_SIZE);
         work.extend_from_slice(&self.remainder);
         work.extend_from_slice(input);
         self.remainder.clear();
@@ -423,14 +573,19 @@ impl NoiseEngine for DeepFilterNetEngine {
         let mut in_pos = 0;
         while in_pos + HOP_SIZE <= work.len() {
             let hop = &work[in_pos..in_pos + HOP_SIZE];
-            let enhanced = self.stft.process_hop(hop, |spectrum| { self.enhance_spectrum(spectrum); });
+            let enhanced = self.stft.process_hop(hop, |spectrum| {
+                self.enhance_spectrum(spectrum);
+            });
             let n = (output.len() - out_pos).min(HOP_SIZE);
             output[out_pos..out_pos + n].copy_from_slice(&enhanced[..n]);
             out_pos += n;
             in_pos += HOP_SIZE;
         }
         self.remainder.extend_from_slice(&work[in_pos..]);
-        while out_pos < output.len() { output[out_pos] = 0.0; out_pos += 1; }
+        while out_pos < output.len() {
+            output[out_pos] = 0.0;
+            out_pos += 1;
+        }
         Ok(())
     }
 
@@ -442,10 +597,15 @@ impl NoiseEngine for DeepFilterNetEngine {
         self.df_hist.reset();
     }
 
-    fn name(&self) -> &'static str { "DeepFilterNet3" }
+    fn name(&self) -> &'static str {
+        "DeepFilterNet3"
+    }
 
     fn latency_samples(&self) -> usize {
-        if self.config.compensate_delay { HOP_SIZE * (1 + DF_LOOKAHEAD + 1) }
-        else { HOP_SIZE * (1 + DF_LOOKAHEAD) }
+        if self.config.compensate_delay {
+            HOP_SIZE * (1 + DF_LOOKAHEAD + 1)
+        } else {
+            HOP_SIZE * (1 + DF_LOOKAHEAD)
+        }
     }
 }
