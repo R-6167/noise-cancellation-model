@@ -6,7 +6,7 @@
 //! Inputs must be aligned mono/first-channel WAVs at 48 kHz. The benchmark removes
 //! the engine's reported startup latency after flushing its final tail.
 
-use hound::{SampleFormat, WavReader};
+use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use noise_cancellation::{
     Denoiser, DenoiserConfig, EngineKind, Strength, SAMPLE_RATE,
 };
@@ -85,6 +85,22 @@ fn process_full_stream(
     Ok(processed[latency..end].to_vec())
 }
 
+fn write_mono_wav(path: &Path, samples: &[f32]) -> Result<(), Box<dyn Error>> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let mut writer = WavWriter::create(path, spec)?;
+    for &sample in samples {
+        let value = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+        writer.write_sample(value)?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
 fn snr_db(clean: &[f32], estimate: &[f32]) -> Option<f64> {
     if clean.is_empty() || clean.len() != estimate.len() {
         return None;
@@ -109,10 +125,8 @@ fn snr_db(clean: &[f32], estimate: &[f32]) -> Option<f64> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 || args.len() > 4 {
-        return Err(
-            "usage: quality_benchmark <clean.wav> <noisy.wav> [model_dir]".into(),
-        );
+    if args.len() < 3 || args.len() > 5 {
+        return Err("usage: quality_benchmark <clean.wav> <noisy.wav> [model_dir] [output_dir]".into());
     }
     let model_dir = PathBuf::from(args.get(3).map(String::as_str).unwrap_or("models"));
     let (clean_rate, clean) = read_first_channel(Path::new(&args[1]))?;
@@ -151,6 +165,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         df_snr - input_snr
     );
     println!("These scores apply only to this aligned reference pair; listen for speech artifacts as well.");
+
+    if let Some(output_dir) = args.get(4) {
+        let output_dir = PathBuf::from(output_dir);
+        std::fs::create_dir_all(&output_dir)?;
+        let rn_path = output_dir.join("rnnoise.wav");
+        let df_path = output_dir.join("deepfilternet.wav");
+        if rn_path.exists() || df_path.exists() {
+            return Err(format!(
+                "refusing to overwrite existing benchmark outputs in {}",
+                output_dir.display()
+            ).into());
+        }
+        write_mono_wav(&rn_path, &rnnoise)?;
+        write_mono_wav(&df_path, &deepfilter)?;
+        println!("Wrote listening outputs: {} and {}", rn_path.display(), df_path.display());
+    }
     Ok(())
 }
 
