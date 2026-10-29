@@ -153,7 +153,8 @@ fn best_lag_snr_db(clean: &[f32], estimate: &[f32], max_lag: usize) -> Option<(f
         let mut dot = 0.0f64;
         let mut reference_power = 0.0f64;
         let mut actual_power = 0.0f64;
-        for i in (0..reference.len()).step_by(8) {
+        let stride = (reference.len() / 4096).max(1);
+        for i in (0..reference.len()).step_by(stride) {
             let a = reference[i] as f64;
             let b = actual[i] as f64;
             dot += a * b;
