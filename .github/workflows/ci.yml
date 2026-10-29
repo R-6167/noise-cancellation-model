@@ -31,6 +31,8 @@ jobs:
         run: cargo build --release --features "cli,c-api"
       - name: Offline CLI tests
         run: cargo test --release --features cli --bin noise-cancel
+      - name: Paired speech quality benchmark tests
+        run: cargo test --release --features cli --example quality_benchmark
       - name: Build RNNoise-only (no default features)
         run: cargo build --release --no-default-features --features rnnoise
       - name: Tests (RNNoise)
