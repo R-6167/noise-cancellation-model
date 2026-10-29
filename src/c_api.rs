@@ -37,12 +37,17 @@ pub enum NcEngine {
     DeepFilterNet = 1,
 }
 
+fn checked_buffer_bytes(samples: usize) -> Option<usize> {
+    let bytes = samples.checked_mul(std::mem::size_of::<f32>())?;
+    (bytes <= isize::MAX as usize).then_some(bytes)
+}
+
 fn ranges_overlap(
     input: *const f32,
     output: *mut f32,
     samples: usize,
 ) -> Option<bool> {
-    let bytes = samples.checked_mul(std::mem::size_of::<f32>())?;
+    let bytes = checked_buffer_bytes(samples)?;
     let input_start = input as usize;
     let output_start = output as usize;
     let input_end = input_start.checked_add(bytes)?;
@@ -218,6 +223,9 @@ pub unsafe extern "C" fn nc_flush(
 ) -> i32 {
     if handle.is_null() || out_written.is_null() || (capacity > 0 && output.is_null()) {
         return NcStatus::ErrNullPointer as i32;
+    }
+    if checked_buffer_bytes(capacity).is_none() {
+        return NcStatus::ErrInvalidArg as i32;
     }
     let h = unsafe { &mut *handle };
     let output_slice: &mut [f32] = if capacity == 0 {
@@ -458,6 +466,9 @@ pub unsafe extern "C" fn nc_flush_interleaved(
         Some(n) => n,
         None => return NcStatus::ErrInvalidArg as i32,
     };
+    if checked_buffer_bytes(samples).is_none() {
+        return NcStatus::ErrInvalidArg as i32;
+    }
     let output_slice: &mut [f32] = if samples == 0 {
         &mut []
     } else {
