@@ -1,6 +1,9 @@
 name: Paired Speech Quality Benchmark
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/dns3-quality-benchmark.yml"
   workflow_dispatch:
     inputs:
       pairs_to_test:
