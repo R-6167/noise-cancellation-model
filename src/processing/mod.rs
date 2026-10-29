@@ -267,7 +267,9 @@ impl Denoiser {
         for (i, sample) in output.iter_mut().enumerate() {
             let dry = self.dry_queue.pop_front().unwrap_or(0.0);
             let wet = self.wet_buf[i];
-            *sample = if self.config.wet_dry_mix {
+            *sample = if self.config.wet_dry_mix && strength == 0.0 {
+                input[i]
+            } else if self.config.wet_dry_mix {
                 dry * (1.0 - strength) + wet * strength
             } else {
                 wet
