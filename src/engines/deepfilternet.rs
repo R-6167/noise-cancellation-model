@@ -393,6 +393,7 @@ pub struct DeepFilterNetEngine {
     onnx: OnnxModels,
     pool: AudioBufferPool,
     remainder: Vec<f32>,
+    output_queue: VecDeque<f32>,
     strength: f32,
     power: [f32; N_FREQS],
     erb_feat: [f32; NB_ERB],
@@ -406,6 +407,11 @@ pub struct DeepFilterNetEngine {
 impl DeepFilterNetEngine {
     pub fn new(config: DeepFilterNetConfig) -> Result<Self> {
         let onnx = OnnxModels::try_load(&config.model_dir)?;
+        let initial_latency = if config.compensate_delay {
+            HOP_SIZE * (1 + DF_LOOKAHEAD + 1)
+        } else {
+            HOP_SIZE * (1 + DF_LOOKAHEAD)
+        };
         Ok(Self {
             config,
             stft: Stft::new(),
@@ -416,6 +422,7 @@ impl DeepFilterNetEngine {
             onnx,
             pool: AudioBufferPool::for_streaming(),
             remainder: Vec::with_capacity(HOP_SIZE * 2),
+            output_queue: std::iter::repeat_n(0.0, initial_latency).collect(),
             strength: 0.85,
             power: [0.0; N_FREQS],
             erb_feat: [0.0; NB_ERB],
@@ -629,7 +636,7 @@ impl NoiseEngine for DeepFilterNetEngine {
         work.extend_from_slice(&self.remainder);
         work.extend_from_slice(input);
         self.remainder.clear();
-        let mut out_pos = 0;
+
         let mut in_pos = 0;
         while in_pos + HOP_SIZE <= work.len() {
             let hop = &work[in_pos..in_pos + HOP_SIZE];
@@ -638,21 +645,23 @@ impl NoiseEngine for DeepFilterNetEngine {
             self.enhance_spectrum(&mut spectrum);
             self.stft.spectrum = spectrum;
             let enhanced = self.stft.synthesize_hop();
-            let n = (output.len() - out_pos).min(HOP_SIZE);
-            output[out_pos..out_pos + n].copy_from_slice(&enhanced[..n]);
-            out_pos += n;
+            self.output_queue.extend(enhanced);
             in_pos += HOP_SIZE;
         }
         self.remainder.extend_from_slice(&work[in_pos..]);
-        while out_pos < output.len() {
-            output[out_pos] = 0.0;
-            out_pos += 1;
+
+        for sample in output.iter_mut() {
+            *sample = self.output_queue.pop_front().unwrap_or(0.0);
         }
+
         Ok(())
     }
 
     fn reset(&mut self) {
         self.remainder.clear();
+        self.output_queue.clear();
+        let latency = self.latency_samples();
+        self.output_queue.extend(std::iter::repeat_n(0.0, latency));
         self.stft.reset();
         self.erb_norm.reset();
         self.spec_norm.reset();
