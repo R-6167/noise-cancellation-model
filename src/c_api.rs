@@ -89,7 +89,7 @@ fn build_config(
     })
 }
 
-/// Create a denoiser at 48 kHz host rate. See `noise_cancellation.h`.
+/// Create a denoiser at 48 kHz host rate.
 #[no_mangle]
 pub unsafe extern "C" fn nc_create(
     engine: i32,
@@ -100,7 +100,7 @@ pub unsafe extern "C" fn nc_create(
     unsafe { nc_create_with_rate(engine, model_dir, strength, SAMPLE_RATE, out) }
 }
 
-/// Create with explicit host sample rate (Hz). Engines still run at 48 kHz internally.
+/// Create with explicit host sample rate (Hz).
 #[no_mangle]
 pub unsafe extern "C" fn nc_create_with_rate(
     engine: i32,
@@ -147,7 +147,6 @@ pub unsafe extern "C" fn nc_create_with_rate(
     NcStatus::Ok as i32
 }
 
-/// Destroy a handle. Safe with NULL.
 #[no_mangle]
 pub unsafe extern "C" fn nc_destroy(handle: *mut NcHandle) {
     if !handle.is_null() {
@@ -155,7 +154,6 @@ pub unsafe extern "C" fn nc_destroy(handle: *mut NcHandle) {
     }
 }
 
-/// Process mono f32 at the handle's host sample rate. input/output may alias.
 #[no_mangle]
 pub unsafe extern "C" fn nc_process(
     handle: *mut NcHandle,
@@ -268,4 +266,143 @@ pub extern "C" fn nc_status_string(status: i32) -> *const c_char {
         _ => b"unknown error\0",
     };
     bytes.as_ptr() as *const c_char
+}
+
+// ─── Multi-channel ──────────────────────────────────────────────────
+
+/// Opaque multi-channel handle.
+pub struct NcMultiHandle {
+    multi: crate::processing::MultiDenoiser,
+    name: CString,
+}
+
+/// Create multi-channel denoiser (1..=16 channels) at 48 kHz.
+#[no_mangle]
+pub unsafe extern "C" fn nc_create_multi(
+    engine: i32,
+    model_dir: *const c_char,
+    strength: f32,
+    channels: u32,
+    out: *mut *mut NcMultiHandle,
+) -> i32 {
+    unsafe { nc_create_multi_with_rate(engine, model_dir, strength, SAMPLE_RATE, channels, out) }
+}
+
+/// Create multi-channel denoiser with host sample rate.
+#[no_mangle]
+pub unsafe extern "C" fn nc_create_multi_with_rate(
+    engine: i32,
+    model_dir: *const c_char,
+    strength: f32,
+    sample_rate: u32,
+    channels: u32,
+    out: *mut *mut NcMultiHandle,
+) -> i32 {
+    if out.is_null() {
+        return NcStatus::ErrNullPointer as i32;
+    }
+    ptr::write(out, ptr::null_mut());
+
+    let eng = match engine {
+        0 => NcEngine::Rnnoise,
+        1 => NcEngine::DeepFilterNet,
+        _ => return NcStatus::ErrInvalidArg as i32,
+    };
+
+    let dir = if model_dir.is_null() {
+        None
+    } else {
+        let s = unsafe { CStr::from_ptr(model_dir) };
+        match s.to_str() {
+            Ok(s) if !s.is_empty() => Some(PathBuf::from(s)),
+            Ok(_) => None,
+            Err(_) => return NcStatus::ErrInvalidArg as i32,
+        }
+    };
+
+    let config = match build_config(eng, dir, strength, sample_rate) {
+        Ok(c) => c,
+        Err(e) => return map_err(e) as i32,
+    };
+
+    let multi = match crate::processing::MultiDenoiser::new(channels as usize, config) {
+        Ok(m) => m,
+        Err(e) => return map_err(e) as i32,
+    };
+
+    let name = CString::new(multi.engine_name()).unwrap_or_default();
+    let handle = Box::new(NcMultiHandle { multi, name });
+    unsafe { ptr::write(out, Box::into_raw(handle)) };
+    NcStatus::Ok as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nc_destroy_multi(handle: *mut NcMultiHandle) {
+    if !handle.is_null() {
+        drop(unsafe { Box::from_raw(handle) });
+    }
+}
+
+/// Process interleaved multi-channel audio (frames * channels samples).
+#[no_mangle]
+pub unsafe extern "C" fn nc_process_interleaved(
+    handle: *mut NcMultiHandle,
+    input: *const f32,
+    output: *mut f32,
+    frames: usize,
+) -> i32 {
+    if handle.is_null() || input.is_null() || output.is_null() {
+        return NcStatus::ErrNullPointer as i32;
+    }
+    let h = unsafe { &mut *handle };
+    let ch = h.multi.channels();
+    let n = frames.saturating_mul(ch);
+    if n == 0 {
+        return NcStatus::Ok as i32;
+    }
+    let in_slice = unsafe { std::slice::from_raw_parts(input, n) };
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(output, n) };
+
+    if std::ptr::eq(input, output as *const f32) {
+        let mut tmp = in_slice.to_vec();
+        match h.multi.process_interleaved(in_slice, &mut tmp, frames) {
+            Ok(()) => {
+                out_slice.copy_from_slice(&tmp);
+                NcStatus::Ok as i32
+            }
+            Err(e) => map_err(e) as i32,
+        }
+    } else {
+        match h.multi.process_interleaved(in_slice, out_slice, frames) {
+            Ok(()) => NcStatus::Ok as i32,
+            Err(e) => map_err(e) as i32,
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nc_multi_channels(handle: *const NcMultiHandle, out: *mut u32) -> i32 {
+    if handle.is_null() || out.is_null() {
+        return NcStatus::ErrNullPointer as i32;
+    }
+    unsafe { ptr::write(out, (*handle).multi.channels() as u32) };
+    NcStatus::Ok as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nc_multi_reset(handle: *mut NcMultiHandle) -> i32 {
+    if handle.is_null() {
+        return NcStatus::ErrNullPointer as i32;
+    }
+    unsafe { (*handle).multi.reset() };
+    NcStatus::Ok as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nc_multi_set_strength(handle: *mut NcMultiHandle, strength: f32) -> i32 {
+    if handle.is_null() {
+        return NcStatus::ErrNullPointer as i32;
+    }
+    unsafe { (*handle).multi.set_strength(Strength(strength)) };
+    NcStatus::Ok as i32
 }
