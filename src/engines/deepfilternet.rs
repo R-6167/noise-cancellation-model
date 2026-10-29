@@ -30,6 +30,17 @@ const ERB_WIDTHS: [usize; NB_ERB] = [
 ];
 const NORM_ALPHA: f32 = 0.99;
 
+/// ort allows only one Environment per process.
+fn global_ort_env() -> &'static ort::environment::Environment {
+    use std::sync::OnceLock;
+    static ENV: OnceLock<ort::environment::Environment> = OnceLock::new();
+    ENV.get_or_init(|| {
+        ort::init()
+            .build()
+            .expect("ort Environment init")
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct DeepFilterNetConfig {
     pub model_dir: PathBuf,
@@ -183,10 +194,7 @@ impl Stft {
         }
     }
 
-    fn process_hop<F>(&mut self, hop: &[f32], process_spectrum: F) -> [f32; HOP_SIZE]
-    where
-        F: FnOnce(&mut [Complex<f32>]),
-    {
+    fn analyze_hop(&mut self, hop: &[f32]) {
         self.time_buf.copy_within(HOP_SIZE..FFT_SIZE, 0);
         self.time_buf[HOP_SIZE..].copy_from_slice(hop);
         for i in 0..FFT_SIZE {
@@ -195,7 +203,17 @@ impl Stft {
         self.forward
             .process(&mut self.framed, &mut self.spectrum)
             .expect("FFT forward");
-        process_spectrum(&mut self.spectrum);
+    }
+
+    fn synthesize_hop(&mut self) -> [f32; HOP_SIZE] {
+        // realfft requires DC and Nyquist imag == 0
+        if !self.spectrum.is_empty() {
+            self.spectrum[0].im = 0.0;
+            if self.spectrum.len() > 1 {
+                let last = self.spectrum.len() - 1;
+                self.spectrum[last].im = 0.0;
+            }
+        }
         self.inverse
             .process(&mut self.spectrum, &mut self.time_out)
             .expect("FFT inverse");
@@ -282,13 +300,13 @@ impl OnnxModels {
             )));
         }
 
-        // ort 2.x: Session::builder() without explicit Environment
+        let env = global_ort_env();
         let build = |path: &Path| -> Option<ort::session::Session> {
-            let b = ort::session::Session::builder().ok()?;
-            let b = b
+            let mut b = ort::session::Session::builder(env).ok()?;
+            b = b
                 .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
                 .ok()?;
-            let b = b.with_intra_threads(1).ok()?;
+            b = b.with_intra_threads(1).ok()?;
             match b.commit_from_file(path) {
                 Ok(s) => {
                     log::info!("DFN3 loaded: {}", path.display());
@@ -470,13 +488,36 @@ impl DeepFilterNetEngine {
             Err(_) => return false,
         };
 
-        if let Some(ref mut session) = self.onnx.combined {
-            let inputs = vec![
+        if self.onnx.combined.is_some() {
+            let inputs: Vec<(String, ort::session::SessionInputValue)> = vec![
                 ("feat_erb".to_string(), erb_t.clone().into()),
                 ("feat_spec".to_string(), spec_t.clone().into()),
             ];
-            if let Ok(outputs) = session.run(inputs) {
-                self.extract_outputs(&outputs);
+            let extracted = {
+                let session = self.onnx.combined.as_mut().unwrap();
+                if let Ok(outputs) = session.run(inputs) {
+                    let mut mask = [1.0f32; NB_ERB];
+                    let mut df_coefs = Vec::new();
+                    if let Some(v) = outputs.get("erb_mask").or_else(|| outputs.get("m")) {
+                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                            for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                                mask[i] = x.clamp(0.0, 1.0);
+                            }
+                        }
+                    }
+                    if let Some(v) = outputs.get("df_coefs").or_else(|| outputs.get("coefs")) {
+                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                            df_coefs.extend_from_slice(data);
+                        }
+                    }
+                    Some((mask, df_coefs))
+                } else {
+                    None
+                }
+            };
+            if let Some((mask, df_coefs)) = extracted {
+                self.mask = mask;
+                self.df_coefs = df_coefs;
                 return true;
             }
         }
@@ -484,7 +525,7 @@ impl DeepFilterNetEngine {
         let Some(ref mut enc) = self.onnx.enc else {
             return false;
         };
-        let inputs = vec![
+        let inputs: Vec<(String, ort::session::SessionInputValue)> = vec![
             ("feat_erb".to_string(), erb_t.into()),
             ("feat_spec".to_string(), spec_t.into()),
         ];
@@ -496,17 +537,15 @@ impl DeepFilterNetEngine {
             let mut dec_in = Vec::new();
             for n in ["emb", "e3", "e2", "e1", "e0"] {
                 if let Some(v) = enc_out.get(n) {
-                    dec_in.push((n.to_string(), v.clone()));
+                    dec_in.push((n.to_string(), v));
                 }
             }
             if !dec_in.is_empty() {
                 if let Ok(out) = erb_dec.run(dec_in) {
                     if let Some((_, v)) = out.iter().next() {
-                        if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                            if let Some(data) = arr.view().as_slice() {
-                                for (i, &x) in data.iter().take(NB_ERB).enumerate() {
-                                    self.mask[i] = x.clamp(0.0, 1.0);
-                                }
+                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                            for (i, &x) in data.iter().take(NB_ERB).enumerate() {
+                                self.mask[i] = x.clamp(0.0, 1.0);
                             }
                         }
                     }
@@ -518,41 +557,20 @@ impl DeepFilterNetEngine {
             let mut dec_in = Vec::new();
             for n in ["emb", "c0"] {
                 if let Some(v) = enc_out.get(n) {
-                    dec_in.push((n.to_string(), v.clone()));
+                    dec_in.push((n.to_string(), v));
                 }
             }
             if !dec_in.is_empty() {
                 if let Ok(out) = df_dec.run(dec_in) {
                     if let Some((_, v)) = out.iter().next() {
-                        if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                            if let Some(data) = arr.view().as_slice() {
-                                self.df_coefs.extend_from_slice(data);
-                            }
+                        if let Ok((_, data)) = v.try_extract_tensor::<f32>() {
+                            self.df_coefs.extend_from_slice(data);
                         }
                     }
                 }
             }
         }
         true
-    }
-
-    fn extract_outputs(&mut self, outputs: &ort::session::SessionOutputs) {
-        if let Some(v) = outputs.get("erb_mask").or_else(|| outputs.get("m")) {
-            if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                if let Some(data) = arr.view().as_slice() {
-                    for (i, &x) in data.iter().take(NB_ERB).enumerate() {
-                        self.mask[i] = x.clamp(0.0, 1.0);
-                    }
-                }
-            }
-        }
-        if let Some(v) = outputs.get("df_coefs").or_else(|| outputs.get("coefs")) {
-            if let Ok(arr) = v.try_extract_tensor::<f32>() {
-                if let Some(data) = arr.view().as_slice() {
-                    self.df_coefs.extend_from_slice(data);
-                }
-            }
-        }
     }
 }
 
@@ -573,9 +591,11 @@ impl NoiseEngine for DeepFilterNetEngine {
         let mut in_pos = 0;
         while in_pos + HOP_SIZE <= work.len() {
             let hop = &work[in_pos..in_pos + HOP_SIZE];
-            let enhanced = self.stft.process_hop(hop, |spectrum| {
-                self.enhance_spectrum(spectrum);
-            });
+            self.stft.analyze_hop(hop);
+            let mut spectrum = std::mem::take(&mut self.stft.spectrum);
+            self.enhance_spectrum(&mut spectrum);
+            self.stft.spectrum = spectrum;
+            let enhanced = self.stft.synthesize_hop();
             let n = (output.len() - out_pos).min(HOP_SIZE);
             output[out_pos..out_pos + n].copy_from_slice(&enhanced[..n]);
             out_pos += n;

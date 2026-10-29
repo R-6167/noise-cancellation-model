@@ -14,8 +14,7 @@ pub fn is_model_dir(dir: &Path) -> bool {
     let has_split = dir.join("enc.onnx").is_file()
         && dir.join("erb_dec.onnx").is_file()
         && dir.join("df_dec.onnx").is_file();
-    let has_combined =
-        dir.join("deepfilter.onnx").is_file() || dir.join("dfn3.onnx").is_file();
+    let has_combined = dir.join("deepfilter.onnx").is_file() || dir.join("dfn3.onnx").is_file();
     has_split || has_combined
 }
 

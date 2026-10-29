@@ -1,12 +1,15 @@
 //! Simple offline noise-cancellation CLI.
 
 use clap::Parser;
-use hound::{WavReader, WavWriter, SampleFormat};
+use hound::{SampleFormat, WavReader, WavWriter};
 use noise_cancellation::{Denoiser, DenoiserConfig, EngineKind, Strength, SAMPLE_RATE};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "noise-cancel", about = "High-quality noise cancellation (RNNoise / DeepFilterNet3)")]
+#[command(
+    name = "noise-cancel",
+    about = "High-quality noise cancellation (RNNoise / DeepFilterNet3)"
+)]
 struct Args {
     /// Input WAV file
     input: PathBuf,
@@ -75,11 +78,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             #[cfg(not(feature = "deepfilternet"))]
             {
-                return Err("deepfilternet feature not enabled – rebuild with --features deepfilternet".into());
+                return Err(
+                    "deepfilternet feature not enabled – rebuild with --features deepfilternet"
+                        .into(),
+                );
             }
         }
         other => {
-            return Err(format!("unknown engine '{}', use 'rnnoise' or 'deepfilternet'", other).into());
+            return Err(format!(
+                "unknown engine '{}', use 'rnnoise' or 'deepfilternet'",
+                other
+            )
+            .into());
         }
     };
 
@@ -87,6 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine,
         strength: Strength(args.strength),
         wet_dry_mix: !args.full,
+        sample_rate: SAMPLE_RATE,
     };
 
     let mut denoiser = Denoiser::new(config)?;

@@ -14,6 +14,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut output = vec![0.0f32; input.len()];
 
     den.process(&input, &mut output)?;
-    println!("Processed {} samples with {}", input.len(), den.engine_name());
+    println!(
+        "Processed {} samples with {}",
+        input.len(),
+        den.engine_name()
+    );
     Ok(())
 }

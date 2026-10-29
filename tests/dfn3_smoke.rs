@@ -82,6 +82,7 @@ fn processes_noise_and_tone() {
         engine: EngineKind::DeepFilterNet { model_dir: dir },
         strength: Strength(0.9),
         wet_dry_mix: false,
+        sample_rate: SAMPLE_RATE,
     })
     .unwrap();
 
@@ -133,6 +134,7 @@ fn strength_controls_wet_dry() {
         },
         strength: Strength(0.0),
         wet_dry_mix: true,
+        sample_rate: SAMPLE_RATE,
     })
     .unwrap();
     let mut out_dry = vec![0.0f32; n];

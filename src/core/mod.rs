@@ -16,7 +16,10 @@ impl AudioBuffer {
     }
 
     pub fn from_samples(samples: Vec<f32>, sample_rate: u32) -> Self {
-        Self { samples, sample_rate }
+        Self {
+            samples,
+            sample_rate,
+        }
     }
 
     pub fn len(&self) -> usize {

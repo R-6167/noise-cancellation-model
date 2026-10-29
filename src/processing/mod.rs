@@ -4,7 +4,9 @@ mod multi;
 pub use multi::{MultiDenoiser, MAX_CHANNELS};
 
 use crate::engines::NoiseEngine;
-use crate::utils::{default_model_dir, LinearResampler};
+#[cfg(all(not(feature = "rnnoise"), feature = "deepfilternet"))]
+use crate::utils::default_model_dir;
+use crate::utils::LinearResampler;
 use crate::{Error, Result, FRAME_SIZE, SAMPLE_RATE};
 
 #[cfg(feature = "rnnoise")]
@@ -27,6 +29,7 @@ pub enum EngineKind {
     },
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for EngineKind {
     fn default() -> Self {
         #[cfg(feature = "rnnoise")]
@@ -207,8 +210,10 @@ impl Denoiser {
         if self.engine_out.len() < self.engine_in.len() {
             self.engine_out.resize(self.engine_in.len(), 0.0);
         }
-        self.engine
-            .process(&self.engine_in, &mut self.engine_out[..self.engine_in.len()])?;
+        self.engine.process(
+            &self.engine_in,
+            &mut self.engine_out[..self.engine_in.len()],
+        )?;
 
         let strength = self.config.strength.clamp().0;
         if self.config.wet_dry_mix && strength < 1.0 {
@@ -219,8 +224,9 @@ impl Denoiser {
             for i in 0..n {
                 output[i] = input[i] * (1.0 - strength) + wet_host[i] * strength;
             }
-            for i in n..output.len() {
-                output[i] = input[i];
+            if n < output.len() {
+                let out_len = output.len();
+                output[n..].copy_from_slice(&input[n..out_len]);
             }
             self.wet_buf = wet_host;
         } else {
@@ -229,8 +235,11 @@ impl Denoiser {
             down.process(&self.engine_out[..self.engine_in.len()], &mut wet_host);
             let n = input.len().min(wet_host.len());
             output[..n].copy_from_slice(&wet_host[..n]);
-            for i in n..output.len() {
-                output[i] = wet_host.last().copied().unwrap_or(0.0);
+            if n < output.len() {
+                let fill = wet_host.last().copied().unwrap_or(0.0);
+                for x in &mut output[n..] {
+                    *x = fill;
+                }
             }
             self.wet_buf = wet_host;
         }
@@ -243,7 +252,8 @@ impl Denoiser {
         if self.wet_buf.len() < input.len() {
             self.wet_buf.resize(input.len(), 0.0);
         }
-        self.engine.process(input, &mut self.wet_buf[..input.len()])?;
+        self.engine
+            .process(input, &mut self.wet_buf[..input.len()])?;
         let strength = self.config.strength.clamp().0;
         if self.config.wet_dry_mix && strength < 1.0 {
             for i in 0..input.len() {
