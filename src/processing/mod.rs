@@ -57,7 +57,11 @@ impl Strength {
     pub const DEFAULT: Strength = Strength(0.85);
 
     pub fn clamp(self) -> Self {
-        Strength(self.0.clamp(0.0, 1.0))
+        if self.0.is_finite() {
+            Strength(self.0.clamp(0.0, 1.0))
+        } else {
+            Strength(0.0)
+        }
     }
 }
 
@@ -119,7 +123,7 @@ impl Denoiser {
             return Err(Error::InvalidConfig("sample_rate must be > 0".into()));
         }
 
-        let engine: Box<dyn NoiseEngine> = match &config.engine {
+        let mut engine: Box<dyn NoiseEngine> = match &config.engine {
             #[cfg(feature = "rnnoise")]
             EngineKind::Rnnoise => Box::new(RnnoiseEngine::new()),
 
@@ -130,6 +134,7 @@ impl Denoiser {
             }
         };
 
+        engine.set_strength(config.strength.clamp().0);
         let dry_delay_samples = ((engine.latency_samples() as u64 * config.sample_rate as u64)
             / SAMPLE_RATE as u64) as usize;
         let (up, down) = if config.sample_rate != SAMPLE_RATE {
@@ -372,6 +377,7 @@ impl Denoiser {
 
     pub fn set_strength(&mut self, strength: Strength) {
         self.config.strength = strength.clamp();
+        self.engine.set_strength(self.config.strength.0);
     }
 
     pub fn strength(&self) -> Strength {

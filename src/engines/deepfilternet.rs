@@ -443,7 +443,7 @@ impl DeepFilterNetEngine {
     }
 
     pub fn set_strength(&mut self, s: f32) {
-        self.strength = s.clamp(0.0, 1.0);
+        self.strength = if s.is_finite() { s.clamp(0.0, 1.0) } else { 0.0 };
     }
     pub fn models_ready(&self) -> bool {
         self.onnx.ready
@@ -628,6 +628,10 @@ impl DeepFilterNetEngine {
 }
 
 impl NoiseEngine for DeepFilterNetEngine {
+    fn set_strength(&mut self, strength: f32) {
+        DeepFilterNetEngine::set_strength(self, strength);
+    }
+
     fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
         if self.flushing {
             return Err(Error::InvalidConfig("stream has been flushed; call reset before processing more audio".into()));

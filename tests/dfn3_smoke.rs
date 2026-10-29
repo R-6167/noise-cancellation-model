@@ -233,3 +233,39 @@ fn engine_flush_preserves_partial_hop_and_drains_reported_latency() {
             "flush/chunk mismatch at {i}: {a} vs {b}");
     }
 }
+
+
+#[test]
+fn configured_strength_reaches_deepfilternet_engine_when_wet_dry_is_disabled() {
+    let dir = require_models();
+    let n = FRAME_SIZE * 20;
+    let input: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            0.12 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                + 0.04 * (((i * 37 + 11) % 101) as f32 / 101.0 - 0.5)
+        })
+        .collect();
+
+    let mut no_suppression = Denoiser::new(DenoiserConfig {
+        engine: EngineKind::DeepFilterNet { model_dir: dir.clone() },
+        strength: Strength(0.0),
+        wet_dry_mix: false,
+        sample_rate: SAMPLE_RATE,
+    }).unwrap();
+    let mut full_suppression = Denoiser::new(DenoiserConfig {
+        engine: EngineKind::DeepFilterNet { model_dir: dir },
+        strength: Strength(1.0),
+        wet_dry_mix: false,
+        sample_rate: SAMPLE_RATE,
+    }).unwrap();
+    let mut a = vec![0.0; n];
+    let mut b = vec![0.0; n];
+    no_suppression.process(&input, &mut a).unwrap();
+    full_suppression.process(&input, &mut b).unwrap();
+
+    let max_diff = a.iter().zip(&b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
+    assert!(max_diff > 1e-5, "configured strength had no effect; max_diff={max_diff}");
+}
