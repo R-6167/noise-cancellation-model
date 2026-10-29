@@ -123,6 +123,72 @@ fn snr_db(clean: &[f32], estimate: &[f32]) -> Option<f64> {
     Some(10.0 * (signal_power / error_power).log10())
 }
 
+
+/// Return the clean/estimate overlap for a lag. Positive lag means the estimate
+/// starts later than the clean reference; negative lag means it starts earlier.
+fn overlap_for_lag<'a>(clean: &'a [f32], estimate: &'a [f32], lag: isize) -> (&'a [f32], &'a [f32]) {
+    let max_lag = clean.len().min(estimate.len()) as isize;
+    let lag = lag.clamp(-max_lag + 1, max_lag - 1);
+    if lag >= 0 {
+        let n = clean.len().min(estimate.len() - lag as usize);
+        (&clean[..n], &estimate[lag as usize..lag as usize + n])
+    } else {
+        let offset = (-lag) as usize;
+        let n = (clean.len() - offset).min(estimate.len());
+        (&clean[offset..offset + n], &estimate[..n])
+    }
+}
+
+/// Find the lag with the strongest normalized correlation, then report ordinary
+/// SNR on that overlap. This is a diagnostic only: the primary score remains
+/// zero-lag SNR because production output should have latency compensated.
+fn best_lag_snr_db(clean: &[f32], estimate: &[f32]) -> Option<(f64, isize)> {
+    if clean.len() < 2 || estimate.len() < 2 {
+        return None;
+    }
+    let max_lag = 4_800isize.min(clean.len().saturating_sub(1) as isize)
+        .min(estimate.len().saturating_sub(1) as isize);
+    let score_corr = |lag: isize, stride: usize| -> f64 {
+        let (reference, actual) = overlap_for_lag(clean, estimate, lag);
+        let mut dot = 0.0f64;
+        let mut ref_power = 0.0f64;
+        let mut actual_power = 0.0f64;
+        for i in (0..reference.len()).step_by(stride) {
+            let a = reference[i] as f64;
+            let b = actual[i] as f64;
+            dot += a * b;
+            ref_power += a * a;
+            actual_power += b * b;
+        }
+        let denom = (ref_power * actual_power).sqrt();
+        if denom <= 1e-20 { -1.0 } else { dot / denom }
+    };
+
+    let coarse_step = 48isize;
+    let mut best_lag = 0isize;
+    let mut best_corr = f64::NEG_INFINITY;
+    let mut lag = -max_lag;
+    while lag <= max_lag {
+        let corr = score_corr(lag, 8);
+        if corr > best_corr {
+            best_corr = corr;
+            best_lag = lag;
+        }
+        lag += coarse_step;
+    }
+    let refine_start = (best_lag - coarse_step).max(-max_lag);
+    let refine_end = (best_lag + coarse_step).min(max_lag);
+    for lag in refine_start..=refine_end {
+        let corr = score_corr(lag, 8);
+        if corr > best_corr {
+            best_corr = corr;
+            best_lag = lag;
+        }
+    }
+    let (reference, actual) = overlap_for_lag(clean, estimate, best_lag);
+    snr_db(reference, actual).map(|score| (score, best_lag))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 || args.len() > 5 {
@@ -153,7 +219,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let rnnoise = process_full_stream(EngineKind::Rnnoise, &noisy)?;
     let rn_snr = snr_db(&clean, &rnnoise).ok_or("cannot calculate RNNoise SNR")?;
-    println!("RNNoise: {rn_snr:.2} dB SNR ({:+.2} dB vs noisy input)", rn_snr - input_snr);
+    println!("RNNoise: {rn_snr:.2} dB zero-lag SNR ({:+.2} dB vs noisy input)", rn_snr - input_snr);
+    if let Some((aligned_snr, lag)) = best_lag_snr_db(&clean, &rnnoise) {
+        println!("RNNoise alignment diagnostic: best SNR {aligned_snr:.2} dB at lag {lag} samples ({:.2} ms); diagnostic only", lag as f64 * 1000.0 / SAMPLE_RATE as f64);
+    }
 
     let deepfilter = process_full_stream(
         EngineKind::DeepFilterNet { model_dir: model_dir.clone() },
@@ -161,10 +230,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     let df_snr = snr_db(&clean, &deepfilter).ok_or("cannot calculate DeepFilterNet SNR")?;
     println!(
-        "DeepFilterNet3: {df_snr:.2} dB SNR ({:+.2} dB vs noisy input)",
+        "DeepFilterNet3: {df_snr:.2} dB zero-lag SNR ({:+.2} dB vs noisy input)",
         df_snr - input_snr
     );
-    println!("These scores apply only to this aligned reference pair; listen for speech artifacts as well.");
+    if let Some((aligned_snr, lag)) = best_lag_snr_db(&clean, &deepfilter) {
+        println!("DeepFilterNet3 alignment diagnostic: best SNR {aligned_snr:.2} dB at lag {lag} samples ({:.2} ms); diagnostic only", lag as f64 * 1000.0 / SAMPLE_RATE as f64);
+    }
+    println!("Zero-lag scores are primary; best-lag scores only diagnose residual timing offsets. Listen for speech artifacts as well.");
 
     if let Some(output_dir) = args.get(4) {
         let output_dir = PathBuf::from(output_dir);
@@ -194,6 +266,19 @@ mod tests {
         let noisy = [0.3f32, -0.2, 0.3, 0.5];
         assert!(snr_db(&clean, &clean).unwrap().is_infinite());
         assert!(snr_db(&clean, &clean).unwrap() > snr_db(&clean, &noisy).unwrap());
+    }
+
+    #[test]
+    fn best_lag_diagnostic_detects_a_delayed_copy() {
+        let clean: Vec<f32> = (0..4096)
+            .map(|i| ((i * 17 % 101) as f32 - 50.0) / 50.0)
+            .collect();
+        let delay = 137usize;
+        let mut delayed = vec![0.0f32; clean.len()];
+        delayed[delay..].copy_from_slice(&clean[..clean.len() - delay]);
+        let (score, lag) = super::best_lag_snr_db(&clean, &delayed).unwrap();
+        assert_eq!(lag, delay as isize);
+        assert!(score > 20.0, "expected high aligned SNR, got {score}");
     }
 
     #[test]
