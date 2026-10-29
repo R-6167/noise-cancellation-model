@@ -67,6 +67,12 @@ NcStatus nc_process(NcHandle *handle,
                     float *output,
                     size_t num_samples);
 
+/* Drain the delayed tail after the final process call. Repeat until out_written == 0. */
+NcStatus nc_flush(NcHandle *handle,
+                  float *output,
+                  size_t capacity,
+                  size_t *out_written);
+
 NcStatus nc_reset(NcHandle *handle);
 NcStatus nc_set_strength(NcHandle *handle, float strength);
 NcStatus nc_get_strength(const NcHandle *handle, float *out_strength);
@@ -100,6 +106,12 @@ NcStatus nc_process_interleaved(NcMultiHandle *handle,
                                 const float *input,
                                 float *output,
                                 size_t frames);
+
+/* Drain delayed interleaved tail frames. Repeat until out_frames == 0. */
+NcStatus nc_flush_interleaved(NcMultiHandle *handle,
+                              float *output,
+                              size_t capacity_frames,
+                              size_t *out_frames);
 
 NcStatus nc_multi_channels(const NcMultiHandle *handle, uint32_t *out);
 NcStatus nc_multi_reset(NcMultiHandle *handle);
