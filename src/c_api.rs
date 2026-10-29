@@ -37,6 +37,19 @@ pub enum NcEngine {
     DeepFilterNet = 1,
 }
 
+fn ranges_overlap(
+    input: *const f32,
+    output: *mut f32,
+    samples: usize,
+) -> Option<bool> {
+    let bytes = samples.checked_mul(std::mem::size_of::<f32>())?;
+    let input_start = input as usize;
+    let output_start = output as usize;
+    let input_end = input_start.checked_add(bytes)?;
+    let output_end = output_start.checked_add(bytes)?;
+    Some(input_start < output_end && output_start < input_end)
+}
+
 fn map_err(e: Error) -> NcStatus {
     match e {
         Error::InvalidConfig(_) => NcStatus::ErrInvalidArg,
@@ -168,20 +181,23 @@ pub unsafe extern "C" fn nc_process(
         return NcStatus::Ok as i32;
     }
 
+    let overlaps = match ranges_overlap(input, output, num_samples) {
+        Some(value) => value,
+        None => return NcStatus::ErrInvalidArg as i32,
+    };
     let h = unsafe { &mut *handle };
-    let in_slice = unsafe { std::slice::from_raw_parts(input, num_samples) };
-    let out_slice = unsafe { std::slice::from_raw_parts_mut(output, num_samples) };
-
-    if std::ptr::eq(input, output as *const f32) {
-        let mut tmp = in_slice.to_vec();
-        match h.den.process(in_slice, &mut tmp) {
-            Ok(()) => {
-                out_slice.copy_from_slice(&tmp);
-                NcStatus::Ok as i32
-            }
+    if overlaps {
+        // Copy before creating the mutable output slice so partial overlap is never aliased.
+        let input_copy =
+            unsafe { std::slice::from_raw_parts(input, num_samples) }.to_vec();
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(output, num_samples) };
+        match h.den.process(&input_copy, out_slice) {
+            Ok(()) => NcStatus::Ok as i32,
             Err(e) => map_err(e) as i32,
         }
     } else {
+        let in_slice = unsafe { std::slice::from_raw_parts(input, num_samples) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(output, num_samples) };
         match h.den.process(in_slice, out_slice) {
             Ok(()) => NcStatus::Ok as i32,
             Err(e) => map_err(e) as i32,
@@ -382,23 +398,28 @@ pub unsafe extern "C" fn nc_process_interleaved(
     }
     let h = unsafe { &mut *handle };
     let ch = h.multi.channels();
-    let n = frames.saturating_mul(ch);
+    let n = match frames.checked_mul(ch) {
+        Some(value) => value,
+        None => return NcStatus::ErrInvalidArg as i32,
+    };
     if n == 0 {
         return NcStatus::Ok as i32;
     }
-    let in_slice = unsafe { std::slice::from_raw_parts(input, n) };
-    let out_slice = unsafe { std::slice::from_raw_parts_mut(output, n) };
+    let overlaps = match ranges_overlap(input, output, n) {
+        Some(value) => value,
+        None => return NcStatus::ErrInvalidArg as i32,
+    };
 
-    if std::ptr::eq(input, output as *const f32) {
-        let mut tmp = in_slice.to_vec();
-        match h.multi.process_interleaved(in_slice, &mut tmp, frames) {
-            Ok(()) => {
-                out_slice.copy_from_slice(&tmp);
-                NcStatus::Ok as i32
-            }
+    if overlaps {
+        let input_copy = unsafe { std::slice::from_raw_parts(input, n) }.to_vec();
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(output, n) };
+        match h.multi.process_interleaved(&input_copy, out_slice, frames) {
+            Ok(()) => NcStatus::Ok as i32,
             Err(e) => map_err(e) as i32,
         }
     } else {
+        let in_slice = unsafe { std::slice::from_raw_parts(input, n) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(output, n) };
         match h.multi.process_interleaved(in_slice, out_slice, frames) {
             Ok(()) => NcStatus::Ok as i32,
             Err(e) => map_err(e) as i32,
@@ -461,4 +482,52 @@ pub unsafe extern "C" fn nc_multi_set_strength(handle: *mut NcMultiHandle, stren
     }
     unsafe { (*handle).multi.set_strength(Strength(strength)) };
     NcStatus::Ok as i32
+}
+
+
+#[cfg(test)]
+mod overlap_tests {
+    use super::*;
+
+    #[test]
+    fn single_channel_partial_overlap_is_safe() {
+        let mut handle: *mut NcHandle = ptr::null_mut();
+        let status = unsafe {
+            nc_create(NcEngine::Rnnoise as i32, ptr::null(), 0.85, &mut handle)
+        };
+        assert_eq!(status, NcStatus::Ok as i32);
+        assert!(!handle.is_null());
+
+        let mut buffer = [0.1f32; 129];
+        let status = unsafe {
+            nc_process(handle, buffer.as_ptr(), buffer.as_mut_ptr().add(1), 128)
+        };
+        assert_eq!(status, NcStatus::Ok as i32);
+        assert!(buffer[1..].iter().all(|sample| sample.is_finite()));
+        unsafe { nc_destroy(handle) };
+    }
+
+    #[test]
+    fn interleaved_partial_overlap_is_safe() {
+        let mut handle: *mut NcMultiHandle = ptr::null_mut();
+        let status = unsafe {
+            nc_create_multi(
+                NcEngine::Rnnoise as i32,
+                ptr::null(),
+                0.85,
+                2,
+                &mut handle,
+            )
+        };
+        assert_eq!(status, NcStatus::Ok as i32);
+        assert!(!handle.is_null());
+
+        let mut buffer = [0.1f32; 65];
+        let status = unsafe {
+            nc_process_interleaved(handle, buffer.as_ptr(), buffer.as_mut_ptr().add(1), 32)
+        };
+        assert_eq!(status, NcStatus::Ok as i32);
+        assert!(buffer[1..].iter().all(|sample| sample.is_finite()));
+        unsafe { nc_destroy_multi(handle) };
+    }
 }

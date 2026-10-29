@@ -33,6 +33,8 @@ jobs:
         run: cargo build --release --no-default-features --features rnnoise
       - name: Tests (RNNoise)
         run: cargo test --release --no-default-features --features rnnoise
+      - name: C ABI overlap safety tests
+        run: cargo test --release --no-default-features --features "rnnoise,c-api" --lib overlap_tests
       - name: Resample + multi-channel smoke
         run: |
           cargo test --release --no-default-features --features rnnoise --test resample_smoke
