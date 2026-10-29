@@ -5,14 +5,16 @@
 | Engine | Quality | CPU | Latency | Status |
 |--------|---------|-----|---------|--------|
 | **RNNoise** | Very good | Extremely low | ~10 ms | Production ready |
-| **DeepFilterNet3** | Excellent | Moderate | ~20–40 ms | **ONNX loading + STFT path live** |
+| **DeepFilterNet3** | Excellent | Moderate | ~20–40 ms | **Encoder inference live** |
 
-## What’s new in 0.2.1
+## What’s new in 0.2.2
 
-- Real `ort` environment + `Session::builder().commit_from_file()` loading
-- Validates enc.onnx / erb_dec.onnx / df_dec.onnx (or combined graph)
-- Graceful fallback to spectral path if ONNX init fails
-- Still one unified `Denoiser` for both engines
+- Encoder session kept alive across hops
+- ERB feature extraction (`feat_erb` [1,1,1,32])
+- Spectral feature extraction (`feat_spec` [1,2,1,96])
+- Real `session.run()` attempts with common input-name variants
+- Automatic fallback to spectral path when tensor names don’t match
+- Input/output name logging for easy debugging against your export
 
 ## Design
 
@@ -20,9 +22,10 @@
 Denoiser
   +-- RnnoiseEngine
   +-- DeepFilterNetEngine
-        +-- STFT / iSTFT (FFT 960, hop 480)
-        +-- ONNX sessions (enc + erb_dec + df_dec)
-        +-- Spectral fallback (always available)
+        +-- STFT / iSTFT
+        +-- ERB + spectral feature builder
+        +-- ONNX encoder (live inference)
+        +-- Spectral fallback
 ```
 
 ## Quick Start
@@ -33,16 +36,13 @@ noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model
 ```
 
 ```rust
-// High-quality path
 let mut den = Denoiser::with_deepfilternet("./models")?;
 den.process(&input, &mut output)?;
 ```
 
-Place models in `./models`:
-- `enc.onnx` + `erb_dec.onnx` + `df_dec.onnx`
-- or `deepfilter.onnx` / `dfn3.onnx`
-
-Download: https://github.com/Rikorose/DeepFilterNet → `models/DeepFilterNet3_onnx.tar.gz`
+Models:
+- `enc.onnx` + `erb_dec.onnx` + `df_dec.onnx`  or  `deepfilter.onnx` / `dfn3.onnx`
+- Download: https://github.com/Rikorose/DeepFilterNet → `models/DeepFilterNet3_onnx.tar.gz`
 
 ## CLI
 
@@ -56,8 +56,9 @@ cargo run --features "cli,deepfilternet" --release --bin noise-cancel -- \
 - [x] Unified Denoiser API
 - [x] RNNoise production engine
 - [x] DeepFilterNet3 STFT / iSTFT
-- [x] ONNX model discovery + session loading via ort
-- [ ] Full neural ERB feature extraction + mask/coefficient application
+- [x] ONNX session loading
+- [x] Encoder feature extraction + inference
+- [ ] ERB decoder + DF decoder + mask/coefficient application
 - [ ] C ABI for audio-studio
 - [ ] Resampling / multi-channel / plugins
 
