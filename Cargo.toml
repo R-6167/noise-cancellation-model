@@ -44,3 +44,8 @@ required-features = ["cli"]
 [lib]
 name = "noise_cancellation"
 crate-type = ["lib", "cdylib", "staticlib"]
+
+
+[[example]]
+name = "quality_benchmark"
+required-features = ["cli", "rnnoise", "deepfilternet"]
