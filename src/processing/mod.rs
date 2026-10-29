@@ -212,9 +212,12 @@ impl Denoiser {
 
         if self.engine_in.is_empty() {
             self.dry_queue.extend(input.iter().copied());
-            for sample in output.iter_mut() {
+            for (i, sample) in output.iter_mut().enumerate() {
                 let dry = self.dry_queue.pop_front().unwrap_or(0.0);
-                *sample = if self.config.wet_dry_mix {
+                *sample = if self.config.wet_dry_mix && strength == 0.0 {
+                    // A fully dry setting is a true pass-through, without algorithmic latency.
+                    input[i]
+                } else if self.config.wet_dry_mix {
                     dry * (1.0 - strength)
                 } else {
                     0.0
@@ -239,7 +242,9 @@ impl Denoiser {
         for (i, sample) in output.iter_mut().enumerate() {
             let dry = self.dry_queue.pop_front().unwrap_or(0.0);
             let wet = wet_host.get(i).copied().unwrap_or(0.0);
-            *sample = if self.config.wet_dry_mix {
+            *sample = if self.config.wet_dry_mix && strength == 0.0 {
+                input[i]
+            } else if self.config.wet_dry_mix {
                 dry * (1.0 - strength) + wet * strength
             } else {
                 wet
