@@ -3,9 +3,9 @@
 //! Design goals for low, predictable CPU:
 //!   - Zero heap allocation on the per-hop hot path after warm-up
 //!   - Pre-allocated feature buffers
-//!   - Cached successful tensor input names (no repeated trial-and-error)
-//!   - Single-threaded ort sessions (deterministic latency)
-//!   - Minimal logging after first successful frame
+//!   - Cached successful tensor input names
+//!   - Single-threaded ort sessions
+//!   - AudioBufferPool for streaming work buffers
 
 #![cfg(feature = "deepfilternet")]
 
@@ -16,9 +16,8 @@ use realfft::num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 
 use crate::engines::NoiseEngine;
+use crate::utils::AudioBufferPool;
 use crate::{Error, Result};
-
-// ─── Constants ──────────────────────────────────────────────────────────────
 
 pub const HOP_SIZE: usize = 480;
 pub const FFT_SIZE: usize = 960;
@@ -26,8 +25,6 @@ pub const N_FREQS: usize = FFT_SIZE / 2 + 1;
 pub const NB_ERB: usize = 32;
 pub const NB_DF: usize = 96;
 pub const DF_ORDER: usize = 5;
-
-// ─── Config ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct DeepFilterNetConfig {
@@ -46,8 +43,6 @@ impl DeepFilterNetConfig {
     }
 }
 
-// ─── STFT (allocation-free after construction) ──────────────────────────────
-
 struct Stft {
     forward: Arc<dyn RealToComplex<f32>>,
     inverse: Arc<dyn ComplexToReal<f32>>,
@@ -64,14 +59,11 @@ impl Stft {
         let mut planner = RealFftPlanner::<f32>::new();
         let forward = planner.plan_fft_forward(FFT_SIZE);
         let inverse = planner.plan_fft_inverse(FFT_SIZE);
-
         let mut window = vec![0.0f32; FFT_SIZE];
         for n in 0..FFT_SIZE {
             let x = std::f32::consts::PI * n as f32 / FFT_SIZE as f32;
-            let s = x.sin().powi(2);
-            window[n] = (std::f32::consts::FRAC_PI_2 * s).sin();
+            window[n] = (std::f32::consts::FRAC_PI_2 * x.sin().powi(2)).sin();
         }
-
         Self {
             forward,
             inverse,
@@ -90,27 +82,17 @@ impl Stft {
     {
         self.time_buf.copy_within(HOP_SIZE..FFT_SIZE, 0);
         self.time_buf[HOP_SIZE..].copy_from_slice(hop);
-
         for i in 0..FFT_SIZE {
             self.framed[i] = self.time_buf[i] * self.window[i];
         }
-
-        self.forward
-            .process(&mut self.framed, &mut self.spectrum)
-            .expect("FFT forward");
-
+        self.forward.process(&mut self.framed, &mut self.spectrum).expect("FFT forward");
         process_spectrum(&mut self.spectrum);
-
-        self.inverse
-            .process(&mut self.spectrum, &mut self.time_out)
-            .expect("FFT inverse");
-
+        self.inverse.process(&mut self.spectrum, &mut self.time_out).expect("FFT inverse");
         let scale = 1.0 / FFT_SIZE as f32;
         for i in 0..FFT_SIZE {
             self.time_out[i] *= scale * self.window[i];
             self.ola[i] += self.time_out[i];
         }
-
         let mut out = [0.0f32; HOP_SIZE];
         out.copy_from_slice(&self.ola[..HOP_SIZE]);
         self.ola.copy_within(HOP_SIZE..FFT_SIZE, 0);
@@ -124,8 +106,6 @@ impl Stft {
         self.spectrum.fill(Complex::new(0.0, 0.0));
     }
 }
-
-// ─── Feature buffers ─────────────────────────────────────────────────────
 
 struct FeatureBufs {
     erb: [f32; NB_ERB],
@@ -164,8 +144,6 @@ impl FeatureBufs {
     }
 }
 
-// ─── Apply helpers ───────────────────────────────────────────────────────
-
 fn apply_erb_mask(spectrum: &mut [Complex<f32>], mask: &[f32; NB_ERB], strength: f32) {
     let n = spectrum.len().min(N_FREQS);
     let max_bin = NB_DF.min(n).max(1);
@@ -175,8 +153,7 @@ fn apply_erb_mask(spectrum: &mut [Complex<f32>], mask: &[f32; NB_ERB], strength:
         let b1 = (b0 + 1).min(NB_ERB - 1);
         let frac = band_f - b0 as f32;
         let m = mask[b0] * (1.0 - frac) + mask[b1] * frac;
-        let gain = 1.0 - strength + strength * m.clamp(0.0, 1.0);
-        spectrum[k] *= gain;
+        spectrum[k] *= 1.0 - strength + strength * m.clamp(0.0, 1.0);
     }
 }
 
@@ -189,8 +166,7 @@ fn apply_deep_filter(spectrum: &mut [Complex<f32>], coefs: &[f32], strength: f32
         let re = coefs[k * 2];
         let im = coefs.get(k * 2 + 1).copied().unwrap_or(0.0);
         let g = Complex::new(re, im).norm().clamp(0.0, 2.0);
-        let gain = 1.0 - strength + strength * g.min(1.0);
-        spectrum[k] *= gain;
+        spectrum[k] *= 1.0 - strength + strength * g.min(1.0);
     }
 }
 
@@ -200,25 +176,16 @@ fn apply_spectral_suppression(spectrum: &mut [Complex<f32>], strength: f32) {
     let half = N_FREQS / 2;
     for (k, bin) in spectrum.iter_mut().enumerate() {
         let power = bin.norm_sqr();
-        let freq_weight = if k < NB_DF {
-            1.0
-        } else if k < half {
-            0.65
-        } else {
-            0.35
-        };
+        let freq_weight = if k < NB_DF { 1.0 } else if k < half { 0.65 } else { 0.35 };
         let gain = if power < 1e-12 {
             floor
         } else {
             let snr_est = (power / (power + 2e-6)).sqrt();
-            (snr_est * (1.0 - strength * freq_weight) + floor * strength * freq_weight)
-                .clamp(floor, 1.0)
+            (snr_est * (1.0 - strength * freq_weight) + floor * strength * freq_weight).clamp(floor, 1.0)
         };
         *bin *= gain;
     }
 }
-
-// ─── Name cache ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Default)]
 struct NameCache {
@@ -227,8 +194,6 @@ struct NameCache {
     df_from: Option<&'static str>,
     resolved: bool,
 }
-
-// ─── ONNX models ─────────────────────────────────────────────────────────
 
 struct OnnxModels {
     ready: bool,
@@ -253,9 +218,7 @@ impl OnnxModels {
 
         if !has_split && !has_combined {
             return Err(Error::Engine(format!(
-                "No DeepFilterNet3 ONNX models found in {}.\n\
-                 Expected enc.onnx + erb_dec.onnx + df_dec.onnx \
-                 or deepfilter.onnx / dfn3.onnx",
+                "No DeepFilterNet3 ONNX models found in {}.",
                 model_dir.display()
             )));
         }
@@ -350,7 +313,6 @@ impl OnnxModels {
             };
 
         use ort::value::Tensor;
-
         let erb_t = match Tensor::from_array(erb_array) {
             Ok(t) => t,
             Err(_) => return false,
@@ -366,13 +328,11 @@ impl OnnxModels {
                 &[("erb", true), ("spec", false)],
                 &[("input", true)],
             ];
-
             let mut success = None;
             let start = self.names.enc_attempt.unwrap_or(0) as usize;
             let order: Vec<usize> = std::iter::once(start)
                 .chain((0..ATTEMPTS.len()).filter(|&i| i != start))
                 .collect();
-
             for idx in order {
                 let attempt = ATTEMPTS[idx];
                 let mut owned = Vec::with_capacity(2);
@@ -383,7 +343,6 @@ impl OnnxModels {
                 if let Ok(outputs) = enc.run(owned) {
                     if !self.names.resolved {
                         self.names.enc_attempt = Some(idx as u8);
-                        log::info!("Encoder input pattern cached: attempt {idx}");
                     }
                     success = Some(outputs);
                     break;
@@ -462,17 +421,15 @@ impl OnnxModels {
             apply_deep_filter(spectrum, &self.feats.coefs, strength);
         }
         apply_spectral_suppression(spectrum, strength * 0.2);
-
         true
     }
 }
-
-// ─── Engine ──────────────────────────────────────────────────────────────────
 
 pub struct DeepFilterNetEngine {
     config: DeepFilterNetConfig,
     stft: Stft,
     onnx: OnnxModels,
+    pool: AudioBufferPool,
     remainder: Vec<f32>,
     strength: f32,
 }
@@ -484,6 +441,7 @@ impl DeepFilterNetEngine {
             config,
             stft: Stft::new(),
             onnx,
+            pool: AudioBufferPool::for_streaming(),
             remainder: Vec::with_capacity(HOP_SIZE * 2),
             strength: 0.85,
         })
@@ -514,8 +472,10 @@ impl NoiseEngine for DeepFilterNetEngine {
             ));
         }
 
-        let mut work = std::mem::take(&mut self.remainder);
+        let mut work = self.pool.acquire(self.remainder.len() + input.len() + HOP_SIZE);
+        work.extend_from_slice(&self.remainder);
         work.extend_from_slice(input);
+        self.remainder.clear();
 
         let strength = self.strength;
         let mut out_pos = 0;
@@ -523,20 +483,18 @@ impl NoiseEngine for DeepFilterNetEngine {
 
         while in_pos + HOP_SIZE <= work.len() {
             let hop = &work[in_pos..in_pos + HOP_SIZE];
-
             let enhanced = self.stft.process_hop(hop, |spectrum| {
                 if !self.onnx.enhance(spectrum, strength) {
                     apply_spectral_suppression(spectrum, strength);
                 }
             });
-
             let n = (output.len() - out_pos).min(HOP_SIZE);
             output[out_pos..out_pos + n].copy_from_slice(&enhanced[..n]);
             out_pos += n;
             in_pos += HOP_SIZE;
         }
 
-        self.remainder = work[in_pos..].to_vec();
+        self.remainder.extend_from_slice(&work[in_pos..]);
 
         while out_pos < output.len() {
             output[out_pos] = 0.0;
