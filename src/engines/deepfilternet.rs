@@ -30,6 +30,17 @@ const ERB_WIDTHS: [usize; NB_ERB] = [
 ];
 const NORM_ALPHA: f32 = 0.99;
 
+/// ort allows only one Environment per process.
+fn global_ort_env() -> &'static ort::environment::Environment {
+    use std::sync::OnceLock;
+    static ENV: OnceLock<ort::environment::Environment> = OnceLock::new();
+    ENV.get_or_init(|| {
+        ort::init()
+            .build()
+            .expect("ort Environment init")
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct DeepFilterNetConfig {
     pub model_dir: PathBuf,
@@ -195,6 +206,14 @@ impl Stft {
     }
 
     fn synthesize_hop(&mut self) -> [f32; HOP_SIZE] {
+        // realfft requires DC and Nyquist imag == 0
+        if !self.spectrum.is_empty() {
+            self.spectrum[0].im = 0.0;
+            if self.spectrum.len() > 1 {
+                let last = self.spectrum.len() - 1;
+                self.spectrum[last].im = 0.0;
+            }
+        }
         self.inverse
             .process(&mut self.spectrum, &mut self.time_out)
             .expect("FFT inverse");
@@ -263,7 +282,6 @@ struct OnnxModels {
     erb_dec: Option<ort::session::Session>,
     df_dec: Option<ort::session::Session>,
     loaded_paths: Vec<PathBuf>,
-    _env: ort::environment::Environment,
 }
 
 impl OnnxModels {
@@ -282,14 +300,9 @@ impl OnnxModels {
             )));
         }
 
-        let env = match ort::init().build() {
-            Ok(e) => e,
-            Err(e) => {
-                return Err(Error::Engine(format!("ort environment init failed: {e}")));
-            }
-        };
+        let env = global_ort_env();
         let build = |path: &Path| -> Option<ort::session::Session> {
-            let mut b = ort::session::Session::builder(&env).ok()?;
+            let mut b = ort::session::Session::builder(env).ok()?;
             b = b
                 .with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)
                 .ok()?;
@@ -345,7 +358,6 @@ impl OnnxModels {
             erb_dec,
             df_dec,
             loaded_paths: loaded,
-            _env: env,
         })
     }
 }
