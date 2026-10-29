@@ -628,6 +628,10 @@ impl DeepFilterNetEngine {
 }
 
 impl NoiseEngine for DeepFilterNetEngine {
+    fn set_strength(&mut self, strength: f32) {
+        DeepFilterNetEngine::set_strength(self, strength);
+    }
+
     fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
         if self.flushing {
             return Err(Error::InvalidConfig("stream has been flushed; call reset before processing more audio".into()));
