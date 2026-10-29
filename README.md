@@ -4,8 +4,10 @@
 
 | Engine | Needs files? | Quality | CPU | Status |
 |--------|--------------|---------|-----|--------|
-| **RNNoise** (default) | **None** – weights embedded | Very good | Extremely low | **Production** |
+| **RNNoise** (runtime default) | **None** – weights embedded | Very good | Extremely low | **Production** |
 | **DeepFilterNet3** | Vendored in `./models` | High (unbenchmarked) | Moderate | **Beta** |
+
+Both engines are **compiled in by default**. `Denoiser::with_defaults()` still selects **RNNoise** at runtime; use `with_deepfilternet_auto()` (or C `NC_ENGINE_DEEPFILTERNET`) for DFN.
 
 ## Status / readiness
 
@@ -17,13 +19,14 @@
 | DeepFilterNet3 for highest quality | **Beta** — compiles and smoke-tests; validate audio quality yourself before shipping |
 | crates.io publish / strict API stability | Not yet (0.x) |
 
-CI on this branch covers format, clippy (RNNoise), release builds, and smoke tests for both engines. Prefer RNNoise for production until DFN quality is measured against real noisy speech (e.g. PESQ/STOI or listening tests).
+CI covers format, clippy (default + RNNoise-only), release builds for both engines together and separately, and smoke tests. Prefer RNNoise for production until DFN quality is measured against real noisy speech (e.g. PESQ/STOI or listening tests).
 
 ## Quick start (Rust)
 
 ```toml
 [dependencies]
 noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model" }
+# default features = rnnoise + deepfilternet
 ```
 
 ```rust
@@ -36,15 +39,15 @@ den.process(&input, &mut output)?;
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `rnnoise` | yes | Lightweight RNNoise engine (embedded weights) |
-| `deepfilternet` | no | DeepFilterNet3 via ONNX Runtime + vendored models |
+| `rnnoise` | **yes** | Lightweight RNNoise engine (embedded weights) |
+| `deepfilternet` | **yes** | DeepFilterNet3 via ONNX Runtime + vendored models |
 | `c-api` | no | C ABI (`include/noise_cancellation.h`) |
 | `cli` | no | `noise-cancel` binary + WAV I/O |
 
-Enable both engines if needed:
+RNNoise-only (smaller binary, no ort):
 
 ```toml
-noise_cancellation = { git = "...", features = ["rnnoise", "deepfilternet"] }
+noise_cancellation = { git = "...", default-features = false, features = ["rnnoise"] }
 ```
 
 ## Sample rates
@@ -68,7 +71,9 @@ Common rates: 8 / 16 / 22.05 / 32 / 44.1 / 48 kHz.
 Header: [`include/noise_cancellation.h`](include/noise_cancellation.h)
 
 ```bash
-cargo build --release --features "rnnoise,c-api"
+cargo build --release --features "c-api"   # both engines (default) + C ABI
+# or RNNoise-only:
+cargo build --release --no-default-features --features "rnnoise,c-api"
 ```
 
 ```c
@@ -114,7 +119,6 @@ Resolution order for `with_deepfilternet_auto`: `NOISE_CANCEL_MODEL_DIR` → `./
 
 - Smoke-tested only (load, no NaNs, silence, dry-pass at strength 0). **No formal quality benchmark** vs upstream DeepFilterNet or vs RNNoise.
 - Depends on `ort` 2.0 RC (API may still move).
-- Clippy with `-D warnings` is enforced for RNNoise; DFN is build-tested but not under the same lint gate.
 - Prefer listening tests / objective metrics before shipping DFN as the primary engine.
 
 ## CLI
@@ -140,15 +144,18 @@ den.set_strength(Strength(0.9));
 ## Testing
 
 ```bash
-# RNNoise (default)
-cargo test --release --features rnnoise
+# Default (both engines compiled; RNNoise tests)
+cargo test --release
+
+# RNNoise-only
+cargo test --release --no-default-features --features rnnoise
 
 # DeepFilterNet3 smoke
 cargo test --release --features deepfilternet --test dfn3_smoke
 
 # Resample + multi-channel
-cargo test --release --features rnnoise --test resample_smoke
-cargo test --release --features rnnoise --test multi_channel_smoke
+cargo test --release --no-default-features --features rnnoise --test resample_smoke
+cargo test --release --no-default-features --features rnnoise --test multi_channel_smoke
 ```
 
 ## Platform notes
@@ -156,6 +163,7 @@ cargo test --release --features rnnoise --test multi_channel_smoke
 - CI runs on **Ubuntu** only.
 - `ort` downloads platform binaries when the `deepfilternet` feature is enabled (`download-binaries`).
 - Cross-compile / mobile targets are not covered by CI.
+- For a smaller binary without ONNX Runtime: `--no-default-features --features rnnoise`.
 
 ## License
 
