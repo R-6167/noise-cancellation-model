@@ -66,6 +66,9 @@ fn build_config(
     strength: f32,
     sample_rate: u32,
 ) -> Result<DenoiserConfig, Error> {
+    if !strength.is_finite() {
+        return Err(Error::InvalidConfig("strength must be finite".into()));
+    }
     let strength = Strength(strength.clamp(0.0, 1.0));
     let kind = match engine {
         NcEngine::Rnnoise => {
@@ -244,6 +247,9 @@ pub unsafe extern "C" fn nc_reset(handle: *mut NcHandle) -> i32 {
 pub unsafe extern "C" fn nc_set_strength(handle: *mut NcHandle, strength: f32) -> i32 {
     if handle.is_null() {
         return NcStatus::ErrNullPointer as i32;
+    }
+    if !strength.is_finite() {
+        return NcStatus::ErrInvalidArg as i32;
     }
     unsafe { (*handle).den.set_strength(Strength(strength)) };
     NcStatus::Ok as i32
