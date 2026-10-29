@@ -1,0 +1,165 @@
+name: DNS3 Public Dataset Quality Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      pairs_to_test:
+        description: "Number of paired clips to evaluate (1–10)"
+        required: true
+        default: "5"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dns3-quality-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Benchmark on official DNS3 fullband dev set
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate pair count
+        env:
+          PAIRS_TO_TEST: ${{ inputs.pairs_to_test }}
+        run: |
+          python3 - <<'PY'
+          import os
+          value = int(os.environ["PAIRS_TO_TEST"])
+          if not 1 <= value <= 10:
+              raise SystemExit("pairs_to_test must be between 1 and 10")
+          PY
+
+      - name: Download official DNS Challenge 3 fullband development test set
+        run: |
+          mkdir -p dataset benchmark-output
+          curl --fail --location --silent --show-error --proto '=https' \
+            --max-filesize 1000000000 \
+            https://dns3public.blob.core.windows.net/dns3archive/datasets_fullband/datasets_fullband.dev_testset_fullband.tar.bz2 \
+            --output dataset/dns3-dev-testset.tar.bz2
+          test -s dataset/dns3-dev-testset.tar.bz2
+          ls -lh dataset/dns3-dev-testset.tar.bz2
+
+      - name: Safely extract WAVs and discover clean/noisy pairs
+        env:
+          PAIRS_TO_TEST: ${{ inputs.pairs_to_test }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          archive = Path("dataset/dns3-dev-testset.tar.bz2")
+          root = Path("dataset/extracted").resolve()
+          root.mkdir(parents=True, exist_ok=True)
+          wav_paths = []
+          listing = []
+
+          with tarfile.open(archive, "r:bz2") as tar:
+              for member in tar:
+                  name = PurePosixPath(member.name)
+                  listing.append(member.name)
+                  if not member.isfile() or name.is_absolute() or ".." in name.parts:
+                      continue
+                  if name.suffix.lower() != ".wav":
+                      continue
+                  destination = (root / Path(*name.parts)).resolve()
+                  if root not in destination.parents:
+                      raise SystemExit(f"Unsafe archive path: {member.name}")
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  source = tar.extractfile(member)
+                  if source is None:
+                      continue
+                  with source, destination.open("wb") as output:
+                      while True:
+                          block = source.read(1024 * 1024)
+                          if not block:
+                              break
+                          output.write(block)
+                  wav_paths.append(destination)
+
+          Path("benchmark-output/dataset-file-list.txt").write_text(
+              "\n".join(listing) + "\n", encoding="utf-8"
+          )
+
+          def pair_key(path):
+              relative = path.relative_to(root).as_posix().lower()
+              tokens = re.findall(r"[a-z]+", relative)
+              has_clean = any(token in {"clean", "cleaned", "target"} for token in tokens)
+              has_noisy = any(token in {"noisy", "noise"} for token in tokens)
+              # Also handle common names such as clean_foo.wav / foo_clean.wav.
+              has_clean = has_clean or bool(re.search(r"(^|[/_.-])clean([/_.-]|$)", relative))
+              has_noisy = has_noisy or bool(re.search(r"(^|[/_.-])noisy([/_.-]|$)", relative))
+              if has_clean == has_noisy:
+                  return None, None
+              normalized = re.sub(r"(^|[/_.-])(clean|cleaned|target|noisy|noise)(?=[/_.-]|$)", r"\1PAIR", relative)
+              normalized = re.sub(r"/+", "/", normalized)
+              return ("clean" if has_clean else "noisy"), normalized
+
+          groups = {}
+          for path in wav_paths:
+              kind, key = pair_key(path)
+              if kind:
+                  groups.setdefault(key, {})[kind] = path
+
+          pairs = [
+              (key, value["clean"], value["noisy"])
+              for key, value in sorted(groups.items())
+              if "clean" in value and "noisy" in value
+          ]
+          report = [
+              f"Archive WAV count: {len(wav_paths)}",
+              f"Matched clean/noisy pairs: {len(pairs)}",
+          ]
+          report.extend(f"{key}\t{clean}\t{noisy}" for key, clean, noisy in pairs)
+          Path("benchmark-output/pair-discovery.txt").write_text(
+              "\n".join(report) + "\n", encoding="utf-8"
+          )
+          print("\n".join(report[:20]))
+
+          if not pairs:
+              raise SystemExit(
+                  "Could not automatically identify clean/noisy pairs. "
+                  "The archive file listing and pair-discovery report will be uploaded for diagnosis."
+              )
+
+          count = int(os.environ["PAIRS_TO_TEST"])
+          with Path("benchmark-output/pairs.tsv").open("w", encoding="utf-8") as out:
+              for index, (key, clean, noisy) in enumerate(pairs[:count], start=1):
+                  out.write(f"{index:02d}\t{clean}\t{noisy}\n")
+          PY
+
+      - name: Build benchmark dependencies
+        run: cargo build --release --features cli --example quality_benchmark
+
+      - name: Run paired benchmarks
+        run: |
+          set -euo pipefail
+          while IFS=$'\t' read -r index clean noisy; do
+            echo "===== DNS3 pair $index =====" | tee -a benchmark-output/report.txt
+            cargo run --release --features cli --example quality_benchmark -- \
+              "$clean" "$noisy" models "benchmark-output/pair-$index" \
+              2>&1 | tee -a benchmark-output/report.txt
+          done < benchmark-output/pairs.tsv
+
+      - name: Upload dataset diagnostics, metrics, and listening WAVs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dns3-quality-benchmark-${{ github.run_number }}
+          path: benchmark-output/
+          if-no-files-found: warn
+          retention-days: 14
