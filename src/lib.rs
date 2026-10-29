@@ -10,19 +10,17 @@
 
 pub mod core;
 pub mod engines;
-pub mod processing;
 pub mod error;
+pub mod processing;
 pub mod utils;
 
 #[cfg(feature = "c-api")]
 pub mod c_api;
 
 pub use error::{Error, Result};
-pub use processing::{
-    Denoiser, DenoiserConfig, EngineKind, MultiDenoiser, Strength, MAX_CHANNELS,
-};
+pub use processing::{Denoiser, DenoiserConfig, EngineKind, MultiDenoiser, Strength, MAX_CHANNELS};
 pub use utils::{
-    AudioBufferPool, LinearResampler, PooledBuffer, default_model_dir, find_model_dir, is_model_dir,
+    default_model_dir, find_model_dir, is_model_dir, AudioBufferPool, LinearResampler, PooledBuffer,
 };
 
 /// Common sample type.
