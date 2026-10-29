@@ -189,6 +189,32 @@ pub unsafe extern "C" fn nc_process(
     }
 }
 
+/// Drain delayed tail samples after the final nc_process call.
+#[no_mangle]
+pub unsafe extern "C" fn nc_flush(
+    handle: *mut NcHandle,
+    output: *mut f32,
+    capacity: usize,
+    out_written: *mut usize,
+) -> i32 {
+    if handle.is_null() || out_written.is_null() || (capacity > 0 && output.is_null()) {
+        return NcStatus::ErrNullPointer as i32;
+    }
+    let h = unsafe { &mut *handle };
+    let output_slice: &mut [f32] = if capacity == 0 {
+        &mut []
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(output, capacity) }
+    };
+    match h.den.flush(output_slice) {
+        Ok(written) => {
+            unsafe { ptr::write(out_written, written) };
+            NcStatus::Ok as i32
+        }
+        Err(e) => map_err(e) as i32,
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn nc_reset(handle: *mut NcHandle) -> i32 {
     if handle.is_null() {
@@ -387,6 +413,36 @@ pub unsafe extern "C" fn nc_multi_channels(handle: *const NcMultiHandle, out: *m
     }
     unsafe { ptr::write(out, (*handle).multi.channels() as u32) };
     NcStatus::Ok as i32
+}
+
+/// Drain delayed tail frames from an interleaved multi-channel stream.
+#[no_mangle]
+pub unsafe extern "C" fn nc_flush_interleaved(
+    handle: *mut NcMultiHandle,
+    output: *mut f32,
+    capacity_frames: usize,
+    out_frames: *mut usize,
+) -> i32 {
+    if handle.is_null() || out_frames.is_null() || (capacity_frames > 0 && output.is_null()) {
+        return NcStatus::ErrNullPointer as i32;
+    }
+    let h = unsafe { &mut *handle };
+    let samples = match capacity_frames.checked_mul(h.multi.channels()) {
+        Some(n) => n,
+        None => return NcStatus::ErrInvalidArg as i32,
+    };
+    let output_slice: &mut [f32] = if samples == 0 {
+        &mut []
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(output, samples) }
+    };
+    match h.multi.flush_interleaved(output_slice) {
+        Ok(written) => {
+            unsafe { ptr::write(out_frames, written) };
+            NcStatus::Ok as i32
+        }
+        Err(e) => map_err(e) as i32,
+    }
 }
 
 #[no_mangle]

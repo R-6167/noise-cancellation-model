@@ -33,6 +33,14 @@ noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model
 use noise_cancellation::Denoiser;
 let mut den = Denoiser::with_defaults()?; // 48 kHz, RNNoise
 den.process(&input, &mut output)?;
+// At end-of-stream, drain the delayed tail in chunks.
+let mut tail = vec![0.0; 256];
+loop {
+    let written = den.flush(&mut tail)?;
+    if written == 0 { break; }
+    // Consume tail[..written] (it may be shorter than the buffer).
+}
+// Call den.reset() before processing another stream.
 ```
 
 ### Features
@@ -83,6 +91,12 @@ NcHandle *h = NULL;
 nc_create(NC_ENGINE_RNNOISE, NULL, 0.85f, &h);                 /* 48 kHz */
 nc_create_with_rate(NC_ENGINE_RNNOISE, NULL, 0.85f, 16000, &h); /* 16 kHz */
 nc_process(h, input, output, n_samples);
+float tail[256];
+size_t written = 0;
+do {
+    nc_flush(h, tail, 256, &written);
+    /* Consume tail[0..written]. */
+} while (written > 0);
 nc_destroy(h);
 ```
 
@@ -92,6 +106,12 @@ Multi-channel (interleaved):
 NcMultiHandle *mh = NULL;
 nc_create_multi_with_rate(NC_ENGINE_RNNOISE, NULL, 0.85f, 48000, 2, &mh);
 nc_process_interleaved(mh, interleaved_in, interleaved_out, frames);
+float tail[256 * 2];
+size_t tail_frames = 0;
+do {
+    nc_flush_interleaved(mh, tail, 256, &tail_frames);
+    /* Consume tail_frames interleaved frames. */
+} while (tail_frames > 0);
 nc_destroy_multi(mh);
 ```
 
@@ -139,6 +159,7 @@ den.set_strength(Strength(0.9));
 
 - Engine frame size: **480 samples** (10 ms at 48 kHz).
 - Host latency is scaled when sample rate ≠ 48 kHz (`latency_samples()` / `nc_latency_samples`).
+- Call `Denoiser::flush` (or `nc_flush` in C) at end-of-stream and consume the returned sample count until it returns zero. Reset before reusing the stream.
 - Additional delay may come from the linear resampler’s internal state when rates differ.
 
 ## Testing

@@ -61,6 +61,57 @@ impl MultiDenoiser {
         }
     }
 
+    /// Drain the delayed tail from every planar channel.
+    /// Returns the number of valid samples written per channel.
+    pub fn flush_planar(&mut self, outputs: &mut [&mut [f32]]) -> Result<usize> {
+        if outputs.len() != self.chans.len() {
+            return Err(Error::InvalidConfig(format!(
+                "expected {} output channels, got {}",
+                self.chans.len(),
+                outputs.len()
+            )));
+        }
+        let capacity = outputs.first().map(|s| s.len()).unwrap_or(0);
+        if outputs.iter().any(|s| s.len() != capacity) {
+            return Err(Error::InvalidConfig(
+                "all planar flush output buffers must have equal lengths".into(),
+            ));
+        }
+        let mut written = None;
+        for (channel, output) in self.chans.iter_mut().zip(outputs.iter_mut()) {
+            let count = channel.flush(output)?;
+            if written.is_some_and(|previous| previous != count) {
+                return Err(Error::InvalidConfig(
+                    "channel flush lengths diverged".into(),
+                ));
+            }
+            written = Some(count);
+        }
+        Ok(written.unwrap_or(0))
+    }
+
+    /// Drain the delayed tail into an interleaved output buffer.
+    /// Output length must be divisible by the channel count; returns frames written.
+    pub fn flush_interleaved(&mut self, output: &mut [f32]) -> Result<usize> {
+        let channels = self.chans.len();
+        if !output.len().is_multiple_of(channels) {
+            return Err(Error::InvalidConfig(
+                "interleaved flush output length must be divisible by channel count".into(),
+            ));
+        }
+        let capacity = output.len() / channels;
+        let mut planar: Vec<Vec<f32>> = (0..channels).map(|_| vec![0.0; capacity]).collect();
+        let mut refs: Vec<&mut [f32]> =
+            planar.iter_mut().map(|channel| channel.as_mut_slice()).collect();
+        let frames = self.flush_planar(&mut refs)?;
+        for frame in 0..frames {
+            for channel in 0..channels {
+                output[frame * channels + channel] = planar[channel][frame];
+            }
+        }
+        Ok(frames)
+    }
+
     /// Process planar audio: `inputs[ch][frame]`, `outputs[ch][frame]`.
     pub fn process_planar(&mut self, inputs: &[&[f32]], outputs: &mut [&mut [f32]]) -> Result<()> {
         if inputs.len() != self.chans.len() || outputs.len() != self.chans.len() {

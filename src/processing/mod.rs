@@ -108,6 +108,9 @@ pub struct Denoiser {
     engine_out: Vec<f32>,
     dry_queue: VecDeque<f32>,
     dry_delay_samples: usize,
+    flush_queue: VecDeque<f32>,
+    flushing: bool,
+    flush_remaining: usize,
 }
 
 impl Denoiser {
@@ -148,6 +151,9 @@ impl Denoiser {
             engine_out: Vec::new(),
             dry_queue: std::iter::repeat_n(0.0, dry_delay_samples).collect(),
             dry_delay_samples,
+            flush_queue: VecDeque::new(),
+            flushing: false,
+            flush_remaining: 0,
         })
     }
 
@@ -185,6 +191,9 @@ impl Denoiser {
     }
 
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
+        if self.flushing {
+            return Err(Error::InvalidConfig("stream has been flushed; call reset before processing more audio".into()));
+        }
         if input.len() != output.len() {
             return Err(Error::InvalidConfig(
                 "input and output must have equal length".into(),
@@ -278,6 +287,59 @@ impl Denoiser {
         Ok(())
     }
 
+    /// Finish the stream and drain the remaining delayed output.
+    ///
+    /// Returns the number of valid samples written. Call repeatedly with an
+    /// output buffer of any size until this returns `0`. After flushing,
+    /// call `reset` before processing another stream.
+    pub fn flush(&mut self, output: &mut [f32]) -> Result<usize> {
+        if output.is_empty() || (self.flushing && self.flush_remaining == 0) {
+            return Ok(0);
+        }
+
+        if !self.flushing {
+            self.flushing = true;
+            self.flush_remaining = self.latency_samples();
+
+            let engine_latency = self.engine.latency_samples();
+            let mut engine_tail = vec![0.0f32; engine_latency.max(1)];
+            let written = self.engine.flush(&mut engine_tail)?;
+            engine_tail.truncate(written);
+
+            let mut wet_host = Vec::new();
+            if let Some(down) = self.down.as_mut() {
+                down.process(&engine_tail, &mut wet_host);
+            } else {
+                wet_host.extend_from_slice(&engine_tail);
+            }
+
+            let target = self.flush_remaining;
+            wet_host.resize(target, 0.0);
+            wet_host.truncate(target);
+            self.flush_queue.extend(wet_host);
+        }
+
+        let count = output.len().min(self.flush_remaining);
+        let strength = self.config.strength.clamp().0;
+        for sample in output.iter_mut().take(count) {
+            let wet = self.flush_queue.pop_front().unwrap_or(0.0);
+            let dry = self.dry_queue.pop_front().unwrap_or(0.0);
+            *sample = if self.config.wet_dry_mix && strength == 0.0 {
+                0.0
+            } else if self.config.wet_dry_mix {
+                dry * (1.0 - strength) + wet * strength
+            } else {
+                wet
+            };
+        }
+        self.flush_remaining -= count;
+        if self.flush_remaining == 0 {
+            self.flush_queue.clear();
+        }
+        sanitize_slice(&mut output[..count]);
+        Ok(count)
+    }
+
     pub fn reset(&mut self) {
         self.engine.reset();
         if let Some(r) = self.up.as_mut() {
@@ -290,6 +352,9 @@ impl Denoiser {
         self.engine_out.clear();
         self.dry_queue.clear();
         self.dry_queue.extend(std::iter::repeat_n(0.0, self.dry_delay_samples));
+        self.flush_queue.clear();
+        self.flushing = false;
+        self.flush_remaining = 0;
     }
 
     pub fn engine_name(&self) -> &'static str {
