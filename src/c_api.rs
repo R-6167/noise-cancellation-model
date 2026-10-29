@@ -573,4 +573,37 @@ mod overlap_tests {
         unsafe { nc_destroy(handle) };
     }
 
+    #[test]
+    fn oversized_c_buffers_are_rejected_before_slice_creation() {
+        let mut handle: *mut NcHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { nc_create(NcEngine::Rnnoise as i32, ptr::null(), 0.85, &mut handle) },
+            NcStatus::Ok as i32
+        );
+        assert_eq!(
+            unsafe { nc_process(handle, 1usize as *const f32, 2usize as *mut f32, usize::MAX) },
+            NcStatus::ErrInvalidArg as i32
+        );
+        let mut written = 99usize;
+        assert_eq!(
+            unsafe { nc_flush(handle, 1usize as *mut f32, usize::MAX, &mut written) },
+            NcStatus::ErrInvalidArg as i32
+        );
+        unsafe { nc_destroy(handle) };
+
+        let mut multi: *mut NcMultiHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { nc_create_multi(NcEngine::Rnnoise as i32, ptr::null(), 0.85, 2, &mut multi) },
+            NcStatus::Ok as i32
+        );
+        let mut frames = 99usize;
+        assert_eq!(
+            unsafe {
+                nc_flush_interleaved(multi, 1usize as *mut f32, usize::MAX, &mut frames)
+            },
+            NcStatus::ErrInvalidArg as i32
+        );
+        unsafe { nc_destroy_multi(multi) };
+    }
+
 }
