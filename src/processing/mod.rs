@@ -128,9 +128,6 @@ impl Denoiser {
     }
 
     /// Create a DeepFilterNet3 denoiser using auto-discovered local models.
-    ///
-    /// Searches `NOISE_CANCEL_MODEL_DIR`, `./models`, crate `models/`, and
-    /// `<exe>/models`. No network access.
     #[cfg(feature = "deepfilternet")]
     pub fn with_deepfilternet_auto() -> Result<Self> {
         let model_dir = crate::utils::find_model_dir().ok_or_else(|| {
@@ -189,6 +186,11 @@ impl Denoiser {
 
     pub fn set_strength(&mut self, strength: Strength) {
         self.config.strength = strength.clamp();
+    }
+
+    /// Current suppression strength.
+    pub fn strength(&self) -> Strength {
+        self.config.strength
     }
 
     pub fn sample_rate(&self) -> u32 {
