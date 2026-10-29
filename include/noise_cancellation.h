@@ -5,16 +5,14 @@
  *   - RNNoise (default): fully offline, weights embedded
  *   - DeepFilterNet3: higher quality, uses local models/ ONNX files
  *
- * Sample format: mono float32.
+ * Sample format: mono or interleaved multi-channel float32.
  * Host sample rate may be any positive rate; engines run at 48 kHz with
  * transparent streaming resampling.
- * Preferred block size at 48 kHz: 480 samples (10 ms).
  *
- * Threading: one NcHandle per audio stream.
+ * Threading: one handle per audio stream.
  *
  * Build:
  *   cargo build --release --features "rnnoise,c-api"
- *   cargo build --release --features "rnnoise,deepfilternet,c-api"
  */
 
 #ifndef NOISE_CANCELLATION_H
@@ -28,13 +26,10 @@ extern "C" {
 #include <stdint.h>
 
 #define NC_VERSION_MAJOR 0
-#define NC_VERSION_MINOR 6
+#define NC_VERSION_MINOR 7
 #define NC_VERSION_PATCH 0
 
-/** Engine internal sample rate (Hz). */
 #define NC_SAMPLE_RATE 48000
-
-/** Preferred frame size at 48 kHz (samples). */
 #define NC_FRAME_SIZE 480
 
 typedef enum NcStatus {
@@ -54,16 +49,11 @@ typedef enum NcEngine {
 
 typedef struct NcHandle NcHandle;
 
-/** Create at 48 kHz host rate. */
 NcStatus nc_create(NcEngine engine,
                    const char *model_dir,
                    float strength,
                    NcHandle **out);
 
-/**
- * Create with host sample rate (Hz). Audio is resampled to 48 kHz for the
- * engine and back. Common rates: 8000, 16000, 22050, 32000, 44100, 48000.
- */
 NcStatus nc_create_with_rate(NcEngine engine,
                              const char *model_dir,
                              float strength,
@@ -72,7 +62,6 @@ NcStatus nc_create_with_rate(NcEngine engine,
 
 void nc_destroy(NcHandle *handle);
 
-/** Process mono f32 at the handle's host sample rate. In-place OK. */
 NcStatus nc_process(NcHandle *handle,
                     const float *input,
                     float *output,
@@ -87,6 +76,34 @@ NcStatus nc_engine_name(const NcHandle *handle, const char **out_name);
 uint32_t nc_sample_rate(void);
 size_t nc_frame_size(void);
 const char *nc_status_string(NcStatus status);
+
+/* ---- Multi-channel (interleaved) ---- */
+
+typedef struct NcMultiHandle NcMultiHandle;
+
+NcStatus nc_create_multi(NcEngine engine,
+                         const char *model_dir,
+                         float strength,
+                         uint32_t channels,
+                         NcMultiHandle **out);
+
+NcStatus nc_create_multi_with_rate(NcEngine engine,
+                                   const char *model_dir,
+                                   float strength,
+                                   uint32_t sample_rate,
+                                   uint32_t channels,
+                                   NcMultiHandle **out);
+
+void nc_destroy_multi(NcMultiHandle *handle);
+
+NcStatus nc_process_interleaved(NcMultiHandle *handle,
+                                const float *input,
+                                float *output,
+                                size_t frames);
+
+NcStatus nc_multi_channels(const NcMultiHandle *handle, uint32_t *out);
+NcStatus nc_multi_reset(NcMultiHandle *handle);
+NcStatus nc_multi_set_strength(NcMultiHandle *handle, float strength);
 
 #ifdef __cplusplus
 }
