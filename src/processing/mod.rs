@@ -225,7 +225,8 @@ impl Denoiser {
                 output[i] = input[i] * (1.0 - strength) + wet_host[i] * strength;
             }
             if n < output.len() {
-                output[n..].copy_from_slice(&input[n..output.len()]);
+                let out_len = output.len();
+                output[n..].copy_from_slice(&input[n..out_len]);
             }
             self.wet_buf = wet_host;
         } else {
