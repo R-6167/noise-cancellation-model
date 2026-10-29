@@ -35,7 +35,7 @@ struct Args {
 }
 
 fn first_channel(samples: Vec<f32>, channels: usize) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    if channels == 0 || samples.len() % channels != 0 {
+    if channels == 0 || !samples.len().is_multiple_of(channels) {
         return Err("WAV sample count is not a whole number of frames".into());
     }
     if channels == 1 {
@@ -160,9 +160,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut denoiser = Denoiser::new(config)?;
     println!("Using engine: {}", denoiser.engine_name());
 
-    const BLOCK: usize = 480 * 50; // 0.5 s at 48 kHz (scaled internally for other rates)
+    let block_size = (spec.sample_rate as usize / 2).max(1);
     let dry_bypass = !args.full && args.strength.clamp(0.0, 1.0) == 0.0;
-    let output = process_offline(&mut denoiser, &samples, BLOCK, dry_bypass)?;
+    let output = process_offline(&mut denoiser, &samples, block_size, dry_bypass)?;
 
     let out_spec = hound::WavSpec {
         channels: 1,
