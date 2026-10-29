@@ -14,9 +14,11 @@ pub mod core;
 pub mod engines;
 pub mod processing;
 pub mod error;
+pub mod utils;
 
 pub use error::{Error, Result};
 pub use processing::{Denoiser, DenoiserConfig, EngineKind, Strength};
+pub use utils::{AudioBufferPool, PooledBuffer};
 
 /// Re-export of the common sample type used throughout the library.
 pub type Sample = f32;

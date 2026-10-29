@@ -3,16 +3,16 @@
 
 use nnnoiseless::DenoiseState;
 use crate::engines::NoiseEngine;
+use crate::utils::AudioBufferPool;
 use crate::{Error, Result, FRAME_SIZE};
 
 /// RNNoise-based suppressor.
 pub struct RnnoiseEngine {
     state: Box<DenoiseState<'static>>,
-    /// Temporary buffer for the 480-sample frames RNNoise expects.
     frame_in: [f32; FRAME_SIZE],
     frame_out: [f32; FRAME_SIZE],
-    /// Carry-over samples when input length is not a multiple of FRAME_SIZE.
     remainder: Vec<f32>,
+    pool: AudioBufferPool,
 }
 
 impl RnnoiseEngine {
@@ -23,6 +23,7 @@ impl RnnoiseEngine {
             frame_in: [0.0; FRAME_SIZE],
             frame_out: [0.0; FRAME_SIZE],
             remainder: Vec::with_capacity(FRAME_SIZE),
+            pool: AudioBufferPool::for_streaming(),
         }
     }
 }
@@ -41,15 +42,15 @@ impl NoiseEngine for RnnoiseEngine {
             ));
         }
 
-        // Append new input to any remainder from previous call
-        let mut work = std::mem::take(&mut self.remainder);
+        let mut work = self.pool.acquire(self.remainder.len() + input.len() + FRAME_SIZE);
+        work.extend_from_slice(&self.remainder);
         work.extend_from_slice(input);
+        self.remainder.clear();
 
         let mut out_pos = 0;
         let mut in_pos = 0;
 
         while in_pos + FRAME_SIZE <= work.len() {
-            // RNNoise expects samples roughly in i16 range (±32768)
             for i in 0..FRAME_SIZE {
                 self.frame_in[i] = work[in_pos + i] * 32768.0;
             }
@@ -65,11 +66,8 @@ impl NoiseEngine for RnnoiseEngine {
             in_pos += FRAME_SIZE;
         }
 
-        // Save leftover samples for next call
-        self.remainder = work[in_pos..].to_vec();
+        self.remainder.extend_from_slice(&work[in_pos..]);
 
-        // If we produced fewer samples than requested (first frames), zero-fill
-        // the rest so the caller always gets a full buffer.
         while out_pos < output.len() {
             output[out_pos] = 0.0;
             out_pos += 1;
@@ -88,7 +86,6 @@ impl NoiseEngine for RnnoiseEngine {
     }
 
     fn latency_samples(&self) -> usize {
-        // RNNoise is essentially one frame of delay in streaming use.
         FRAME_SIZE
     }
 }

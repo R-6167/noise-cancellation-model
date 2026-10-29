@@ -5,29 +5,22 @@
 | Engine | Quality | CPU | Latency | Status |
 |--------|---------|-----|---------|--------|
 | **RNNoise** | Very good | Extremely low | ~10 ms | Production ready |
-| **DeepFilterNet3** | Excellent | Moderate (rt-optimised) | ~20–40 ms | **Real-time neural path** |
+| **DeepFilterNet3** | Excellent | Moderate (rt-optimised) | ~20–40 ms | Real-time neural path |
 
-## What’s new in 0.3.1 – Real-time optimisations
+## What’s new in 0.3.2 – Audio buffer pool
 
-- **Zero heap allocation** on the per-hop hot path after warm-up
-- Pre-allocated STFT buffers (`framed`, `time_out`, spectrum, OLA)
-- Pre-allocated feature buffers (`erb`, `spec_ch`, `mask`, `coefs`)
-- **Cached tensor input/output names** – trial-and-error only on first frames
-- ort sessions built with `intra_threads(1)` + `GraphOptimizationLevel::Level3`
-- Minimal logging after name cache is resolved
+- `AudioBufferPool` + `PooledBuffer` utility
+- Both engines acquire work buffers from the pool instead of allocating every `process()` call
+- Buffers automatically returned on drop
+- Pre-warmed pool sized for streaming 10 ms hops
+- Public API: `noise_cancellation::{AudioBufferPool, PooledBuffer}`
 
-## Pipeline (still the same algorithm)
+## Design
 
 ```
-hop
-  → STFT (pre-allocated)
-  → feat_erb + feat_spec (pre-allocated)
-  → encoder.run()          ← cached input names
-  → erb_dec.run() → mask   ← cached output name
-  → df_dec.run()  → coefs  ← cached output name
-  → apply mask + coefs (in-place)
-  → residual spectral gate
-  → iSTFT + OLA (pre-allocated)
+Denoiser
+  +-- RnnoiseEngine      -- uses AudioBufferPool for work buffer
+  +-- DeepFilterNetEngine -- uses AudioBufferPool + pre-alloc STFT/features
 ```
 
 ## Quick Start
@@ -38,8 +31,15 @@ noise_cancellation = { git = "https://github.com/R-6167/noise-cancellation-model
 ```
 
 ```rust
-let mut den = Denoiser::with_deepfilternet("./models")?;
+use noise_cancellation::{Denoiser, AudioBufferPool};
+
+let mut den = Denoiser::with_defaults()?;
 den.process(&input, &mut output)?;
+
+// Or use the pool directly in your own audio graph:
+let mut pool = AudioBufferPool::for_streaming();
+let mut buf = pool.acquire(480 * 10);
+buf.extend_from_slice(&samples);
 ```
 
 ## CLI
@@ -52,9 +52,9 @@ cargo run --features "cli,deepfilternet" --release --bin noise-cancel -- \
 ## Roadmap
 
 - [x] Unified Denoiser API
-- [x] RNNoise production engine
-- [x] Full neural path (enc + decoders)
-- [x] Real-time optimisations (alloc-free hot path, name cache, single-thread sessions)
+- [x] RNNoise + DeepFilterNet3 neural path
+- [x] Real-time optimisations (alloc-free hot path, name cache)
+- [x] Audio buffer pool for work/remainder buffers
 - [ ] Exact ERB matrix / norm stats from official config
 - [ ] Multi-frame DF FIR with history
 - [ ] C ABI for audio-studio
