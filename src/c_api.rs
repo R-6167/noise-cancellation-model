@@ -51,6 +51,7 @@ fn build_config(
     engine: NcEngine,
     model_dir: Option<PathBuf>,
     strength: f32,
+    sample_rate: u32,
 ) -> Result<DenoiserConfig, Error> {
     let strength = Strength(strength.clamp(0.0, 1.0));
     let kind = match engine {
@@ -80,15 +81,32 @@ fn build_config(
         engine: kind,
         strength,
         wet_dry_mix: true,
+        sample_rate: if sample_rate == 0 {
+            SAMPLE_RATE
+        } else {
+            sample_rate
+        },
     })
 }
 
-/// Create a denoiser. See `noise_cancellation.h`.
+/// Create a denoiser at 48 kHz host rate. See `noise_cancellation.h`.
 #[no_mangle]
 pub unsafe extern "C" fn nc_create(
     engine: i32,
     model_dir: *const c_char,
     strength: f32,
+    out: *mut *mut NcHandle,
+) -> i32 {
+    unsafe { nc_create_with_rate(engine, model_dir, strength, SAMPLE_RATE, out) }
+}
+
+/// Create with explicit host sample rate (Hz). Engines still run at 48 kHz internally.
+#[no_mangle]
+pub unsafe extern "C" fn nc_create_with_rate(
+    engine: i32,
+    model_dir: *const c_char,
+    strength: f32,
+    sample_rate: u32,
     out: *mut *mut NcHandle,
 ) -> i32 {
     if out.is_null() {
@@ -113,7 +131,7 @@ pub unsafe extern "C" fn nc_create(
         }
     };
 
-    let config = match build_config(eng, dir, strength) {
+    let config = match build_config(eng, dir, strength, sample_rate) {
         Ok(c) => c,
         Err(e) => return map_err(e) as i32,
     };
@@ -137,7 +155,7 @@ pub unsafe extern "C" fn nc_destroy(handle: *mut NcHandle) {
     }
 }
 
-/// Process mono f32 @ 48 kHz. input/output may alias.
+/// Process mono f32 at the handle's host sample rate. input/output may alias.
 #[no_mangle]
 pub unsafe extern "C" fn nc_process(
     handle: *mut NcHandle,
@@ -173,7 +191,6 @@ pub unsafe extern "C" fn nc_process(
     }
 }
 
-/// Reset stream state.
 #[no_mangle]
 pub unsafe extern "C" fn nc_reset(handle: *mut NcHandle) -> i32 {
     if handle.is_null() {

@@ -28,6 +28,8 @@ jobs:
         run: cargo run --release --example offline_denoise --features cli
       - name: Tests
         run: cargo test --release --features rnnoise
+      - name: Resample smoke tests
+        run: cargo test --release --features rnnoise --test resample_smoke
 
   deepfilternet:
     name: DeepFilterNet3 (vendored models)
