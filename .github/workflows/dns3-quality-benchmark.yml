@@ -1,6 +1,9 @@
 name: Paired Speech Quality Benchmark
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/dns3-quality-benchmark.yml"
   workflow_dispatch:
     inputs:
       pairs_to_test:
@@ -45,16 +48,39 @@ jobs:
       - name: Download paired clean and noisy test sets
         run: |
           mkdir -p dataset/clean dataset/noisy dataset/converted benchmark-output
-          curl --fail --location --silent --show-error --proto '=https' \
+          # DSpace may return an HTML landing/error page with HTTP 200 unless the
+          # download query is explicit. Retry transient upstream failures and then
+          # validate both size and ZIP structure before attempting extraction.
+          curl --fail --location --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --proto '=https' \
             --max-filesize 300000000 \
-            https://datashare.ed.ac.uk/bitstream/handle/10283/2791/clean_testset_wav.zip \
+            'https://datashare.ed.ac.uk/bitstreams/dec213d3-bf57-4777-9663-c24bdce92d5e/download' \
             --output dataset/clean-test.zip
-          curl --fail --location --silent --show-error --proto '=https' \
+          curl --fail --location --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --proto '=https' \
             --max-filesize 300000000 \
-            https://datashare.ed.ac.uk/bitstream/handle/10283/2791/noisy_testset_wav.zip \
+            'https://datashare.ed.ac.uk/bitstreams/13c1bfbf-14a6-41db-9b41-8f7310f01ad5/download' \
             --output dataset/noisy-test.zip
-          test -s dataset/clean-test.zip
-          test -s dataset/noisy-test.zip
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          expected_minimum_bytes = 10_000_000
+          for archive in (Path("dataset/clean-test.zip"), Path("dataset/noisy-test.zip")):
+              size = archive.stat().st_size if archive.exists() else 0
+              if size < expected_minimum_bytes:
+                  raise SystemExit(
+                      f"{archive} is only {size:,} bytes; expected a dataset archive. "
+                      "The upstream server may have returned an HTML page instead of the ZIP."
+                  )
+              if not zipfile.is_zipfile(archive):
+                  raise SystemExit(
+                      f"{archive} is not a valid ZIP archive (downloaded {size:,} bytes)."
+                  )
+              with zipfile.ZipFile(archive) as zf:
+                  bad_member = zf.testzip()
+                  if bad_member:
+                      raise SystemExit(f"{archive} has a corrupt member: {bad_member}")
+              print(f"Validated {archive}: {size:,} bytes")
+          PY
           ls -lh dataset/*-test.zip
 
       - name: Safely extract and match paired clips

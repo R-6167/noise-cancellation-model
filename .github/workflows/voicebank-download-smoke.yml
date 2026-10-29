@@ -1,0 +1,43 @@
+name: VoiceBank Download Smoke Test
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/dns3-quality-benchmark.yml"
+      - ".github/workflows/voicebank-download-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-downloads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download and validate official VoiceBank-DEMAND archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dataset
+          curl --fail --location --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --proto '=https' --max-filesize 300000000 \
+            'https://datashare.ed.ac.uk/bitstreams/dec213d3-bf57-4777-9663-c24bdce92d5e/download' \
+            --output dataset/clean-test.zip
+          curl --fail --location --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --proto '=https' --max-filesize 300000000 \
+            'https://datashare.ed.ac.uk/bitstreams/13c1bfbf-14a6-41db-9b41-8f7310f01ad5/download' \
+            --output dataset/noisy-test.zip
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          for archive in (Path("dataset/clean-test.zip"), Path("dataset/noisy-test.zip")):
+              size = archive.stat().st_size
+              if size < 10_000_000:
+                  raise SystemExit(f"{archive}: suspiciously small ({size:,} bytes)")
+              if not zipfile.is_zipfile(archive):
+                  raise SystemExit(f"{archive}: downloaded content is not a ZIP ({size:,} bytes)")
+              with zipfile.ZipFile(archive) as zf:
+                  bad = zf.testzip()
+                  if bad:
+                      raise SystemExit(f"{archive}: corrupt ZIP member {bad}")
+              print(f"PASS: {archive} ({size:,} bytes; ZIP integrity verified)")
+          PY
