@@ -6,9 +6,9 @@ use noise_cancellation::{Denoiser, DenoiserConfig, EngineKind, Strength, SAMPLE_
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "noise-cancel", about = "High-quality noise cancellation (RNNoise / DeepFilterNet)")]
+#[command(name = "noise-cancel", about = "High-quality noise cancellation (RNNoise / DeepFilterNet3)")]
 struct Args {
-    /// Input WAV file (any common sample rate; will be resampled conceptually – currently expects 48 kHz)
+    /// Input WAV file
     input: PathBuf,
 
     /// Output WAV file
@@ -21,6 +21,14 @@ struct Args {
     /// Use maximum suppression (no dry mix)
     #[arg(long)]
     full: bool,
+
+    /// Engine to use: "rnnoise" (default) or "deepfilternet"
+    #[arg(long, default_value = "rnnoise")]
+    engine: String,
+
+    /// Path to DeepFilterNet3 model directory (required when --engine deepfilternet)
+    #[arg(long)]
+    model_dir: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,7 +41,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Warning: only mono is fully supported; using first channel");
     }
 
-    // For v0.1 we require (or assume) 48 kHz. Real resampling can be added later.
     if spec.sample_rate != SAMPLE_RATE {
         eprintln!(
             "Warning: input is {} Hz, library expects {} Hz. Results may be suboptimal.",
@@ -49,8 +56,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
     };
 
+    let engine = match args.engine.as_str() {
+        "rnnoise" => {
+            #[cfg(feature = "rnnoise")]
+            {
+                EngineKind::Rnnoise
+            }
+            #[cfg(not(feature = "rnnoise"))]
+            {
+                return Err("rnnoise feature not enabled".into());
+            }
+        }
+        "deepfilternet" | "dfn3" | "df" => {
+            #[cfg(feature = "deepfilternet")]
+            {
+                let model_dir = args.model_dir.unwrap_or_else(|| PathBuf::from("models"));
+                EngineKind::DeepFilterNet { model_dir }
+            }
+            #[cfg(not(feature = "deepfilternet"))]
+            {
+                return Err("deepfilternet feature not enabled – rebuild with --features deepfilternet".into());
+            }
+        }
+        other => {
+            return Err(format!("unknown engine '{}', use 'rnnoise' or 'deepfilternet'", other).into());
+        }
+    };
+
     let config = DenoiserConfig {
-        engine: EngineKind::Rnnoise,
+        engine,
         strength: Strength(args.strength),
         wet_dry_mix: !args.full,
     };
@@ -59,7 +93,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Using engine: {}", denoiser.engine_name());
 
     let mut output = vec![0.0f32; samples.len()];
-    // Process in reasonably sized blocks for better cache behaviour
     const BLOCK: usize = 480 * 50; // 0.5 s blocks
     for (chunk_in, chunk_out) in samples.chunks(BLOCK).zip(output.chunks_mut(BLOCK)) {
         denoiser.process(chunk_in, chunk_out)?;

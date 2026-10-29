@@ -6,19 +6,37 @@ use crate::{Error, Result, FRAME_SIZE, SAMPLE_RATE};
 #[cfg(feature = "rnnoise")]
 use crate::engines::rnnoise::RnnoiseEngine;
 
+#[cfg(feature = "deepfilternet")]
+use crate::engines::deepfilternet::{DeepFilterNetConfig, DeepFilterNetEngine};
+
 /// Which engine to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EngineKind {
-    /// Ultra-lightweight RNNoise (default, always available when feature enabled).
+    /// Ultra-lightweight RNNoise (default when feature enabled).
+    #[cfg(feature = "rnnoise")]
     Rnnoise,
     /// Higher-quality DeepFilterNet3 (requires `deepfilternet` feature + model files).
     #[cfg(feature = "deepfilternet")]
-    DeepFilterNet,
+    DeepFilterNet {
+        /// Directory containing the ONNX model files.
+        model_dir: std::path::PathBuf,
+    },
 }
 
 impl Default for EngineKind {
     fn default() -> Self {
-        EngineKind::Rnnoise
+        #[cfg(feature = "rnnoise")]
+        {
+            EngineKind::Rnnoise
+        }
+        #[cfg(all(not(feature = "rnnoise"), feature = "deepfilternet"))]
+        {
+            EngineKind::DeepFilterNet {
+                model_dir: std::path::PathBuf::from("models"),
+            }
+        }
+        #[cfg(all(not(feature = "rnnoise"), not(feature = "deepfilternet")))]
+        compile_error!("At least one of the features `rnnoise` or `deepfilternet` must be enabled");
     }
 }
 
@@ -67,49 +85,48 @@ impl Default for DenoiserConfig {
 pub struct Denoiser {
     engine: Box<dyn NoiseEngine>,
     config: DenoiserConfig,
-    // Temporary buffers for wet/dry mixing
-    dry_buf: Vec<f32>,
     wet_buf: Vec<f32>,
 }
 
 impl Denoiser {
     /// Create a new denoiser with the given configuration.
     pub fn new(config: DenoiserConfig) -> Result<Self> {
-        let engine: Box<dyn NoiseEngine> = match config.engine {
+        let engine: Box<dyn NoiseEngine> = match &config.engine {
             #[cfg(feature = "rnnoise")]
             EngineKind::Rnnoise => Box::new(RnnoiseEngine::new()),
 
             #[cfg(feature = "deepfilternet")]
-            EngineKind::DeepFilterNet => {
-                // Placeholder – full ONNX implementation will be added next.
-                return Err(Error::FeatureDisabled(
-                    "DeepFilterNet engine is not yet fully wired (coming in next iteration)",
-                ));
-            }
-
-            #[cfg(not(feature = "rnnoise"))]
-            EngineKind::Rnnoise => {
-                return Err(Error::FeatureDisabled("rnnoise feature not enabled"));
+            EngineKind::DeepFilterNet { model_dir } => {
+                let df_config = DeepFilterNetConfig::new(model_dir.clone());
+                Box::new(DeepFilterNetEngine::new(df_config)?)
             }
         };
 
         Ok(Self {
             engine,
             config,
-            dry_buf: Vec::new(),
             wet_buf: Vec::new(),
         })
     }
 
-    /// Convenience constructor with default settings (RNNoise, strength 0.85).
+    /// Convenience constructor with default settings (RNNoise when available).
     pub fn with_defaults() -> Result<Self> {
         Self::new(DenoiserConfig::default())
     }
 
+    /// Create a Denoiser that uses DeepFilterNet3.
+    #[cfg(feature = "deepfilternet")]
+    pub fn with_deepfilternet(model_dir: impl Into<std::path::PathBuf>) -> Result<Self> {
+        let config = DenoiserConfig {
+            engine: EngineKind::DeepFilterNet {
+                model_dir: model_dir.into(),
+            },
+            ..Default::default()
+        };
+        Self::new(config)
+    }
+
     /// Process a buffer of mono f32 samples at 48 kHz.
-    ///
-    /// The output buffer must be the same length as the input.
-    /// This method is real-time safe when the engine is (RNNoise is).
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
         if input.len() != output.len() {
             return Err(Error::InvalidConfig(
@@ -121,19 +138,15 @@ impl Denoiser {
             return Ok(());
         }
 
-        // Ensure work buffers are large enough
         if self.wet_buf.len() < input.len() {
             self.wet_buf.resize(input.len(), 0.0);
-            self.dry_buf.resize(input.len(), 0.0);
         }
 
-        // Run the engine
         self.engine.process(input, &mut self.wet_buf[..input.len()])?;
 
         let strength = self.config.strength.clamp().0;
 
         if self.config.wet_dry_mix && strength < 1.0 {
-            // Mix dry + wet
             for i in 0..input.len() {
                 output[i] = input[i] * (1.0 - strength) + self.wet_buf[i] * strength;
             }
@@ -144,32 +157,26 @@ impl Denoiser {
         Ok(())
     }
 
-    /// Reset internal engine state. Call when starting a new, unrelated stream.
     pub fn reset(&mut self) {
         self.engine.reset();
     }
 
-    /// Current engine name.
     pub fn engine_name(&self) -> &'static str {
         self.engine.name()
     }
 
-    /// Approximate algorithmic latency in samples.
     pub fn latency_samples(&self) -> usize {
         self.engine.latency_samples()
     }
 
-    /// Update strength at runtime (cheap).
     pub fn set_strength(&mut self, strength: Strength) {
         self.config.strength = strength.clamp();
     }
 
-    /// Current sample rate required by the library.
     pub fn sample_rate(&self) -> u32 {
         SAMPLE_RATE
     }
 
-    /// Preferred frame size (for lowest latency / best alignment).
     pub fn preferred_frame_size(&self) -> usize {
         FRAME_SIZE
     }

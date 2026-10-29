@@ -1,6 +1,6 @@
 [package]
 name = "noise_cancellation"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "High-quality real-time and offline noise cancellation library (DeepFilterNet3 + RNNoise)"
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ readme = "README.md"
 [features]
 default = ["rnnoise"]
 rnnoise = ["dep:nnnoiseless"]
-deepfilternet = ["dep:ort"]          # optional high-quality engine (requires ONNX models)
+deepfilternet = ["dep:ort"]          # high-quality engine (requires ONNX models)
 c-api = []                           # expose C ABI for embedding in C/C++ apps
 cli = ["dep:clap", "dep:hound", "rnnoise"]
 
