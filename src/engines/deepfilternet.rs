@@ -422,7 +422,7 @@ impl DeepFilterNetEngine {
             onnx,
             pool: AudioBufferPool::for_streaming(),
             remainder: Vec::with_capacity(HOP_SIZE * 2),
-            output_queue: std::iter::repeat(0.0).take(initial_latency).collect(),
+            output_queue: std::iter::repeat_n(0.0, initial_latency).collect(),
             strength: 0.85,
             power: [0.0; N_FREQS],
             erb_feat: [0.0; NB_ERB],
@@ -661,7 +661,7 @@ impl NoiseEngine for DeepFilterNetEngine {
         self.remainder.clear();
         self.output_queue.clear();
         let latency = self.latency_samples();
-        self.output_queue.extend(std::iter::repeat(0.0).take(latency));
+        self.output_queue.extend(std::iter::repeat_n(0.0, latency));
         self.stft.reset();
         self.erb_norm.reset();
         self.spec_norm.reset();
