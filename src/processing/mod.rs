@@ -1,5 +1,8 @@
 //! High-level denoising API intended for application integration.
 
+mod multi;
+pub use multi::{MultiDenoiser, MAX_CHANNELS};
+
 use crate::engines::NoiseEngine;
 use crate::utils::{default_model_dir, LinearResampler};
 use crate::{Error, Result, FRAME_SIZE, SAMPLE_RATE};
@@ -67,8 +70,7 @@ pub struct DenoiserConfig {
     pub strength: Strength,
     /// If true, the original (dry) signal is mixed back according to strength.
     pub wet_dry_mix: bool,
-    /// Host / stream sample rate in Hz. Engines always run at 48 kHz;
-    /// other rates are converted transparently (streaming linear resampler).
+    /// Host sample rate in Hz (engines run at 48 kHz with transparent resampling).
     pub sample_rate: u32,
 }
 
@@ -83,25 +85,26 @@ impl Default for DenoiserConfig {
     }
 }
 
-/// Main high-level denoiser.
-///
-/// One instance should be used per continuous audio stream.
-/// Call `reset()` when switching to an unrelated recording.
+fn sanitize_slice(buf: &mut [f32]) {
+    for x in buf.iter_mut() {
+        if !x.is_finite() {
+            *x = 0.0;
+        }
+    }
+}
+
+/// Main high-level mono denoiser.
 pub struct Denoiser {
     engine: Box<dyn NoiseEngine>,
     config: DenoiserConfig,
     wet_buf: Vec<f32>,
-    /// Host → 48 kHz
     up: Option<LinearResampler>,
-    /// 48 kHz → host
     down: Option<LinearResampler>,
-    /// Scratch at engine rate
     engine_in: Vec<f32>,
     engine_out: Vec<f32>,
 }
 
 impl Denoiser {
-    /// Create a new denoiser with the given configuration.
     pub fn new(config: DenoiserConfig) -> Result<Self> {
         if config.sample_rate == 0 {
             return Err(Error::InvalidConfig("sample_rate must be > 0".into()));
@@ -138,12 +141,10 @@ impl Denoiser {
         })
     }
 
-    /// Convenience constructor with default settings (RNNoise, 48 kHz).
     pub fn with_defaults() -> Result<Self> {
         Self::new(DenoiserConfig::default())
     }
 
-    /// Default engine at an arbitrary host sample rate.
     pub fn with_sample_rate(sample_rate: u32) -> Result<Self> {
         Self::new(DenoiserConfig {
             sample_rate,
@@ -151,36 +152,28 @@ impl Denoiser {
         })
     }
 
-    /// DeepFilterNet3 with explicit model directory (48 kHz host by default).
     #[cfg(feature = "deepfilternet")]
     pub fn with_deepfilternet(model_dir: impl Into<std::path::PathBuf>) -> Result<Self> {
-        let config = DenoiserConfig {
+        Self::new(DenoiserConfig {
             engine: EngineKind::DeepFilterNet {
                 model_dir: model_dir.into(),
             },
             ..Default::default()
-        };
-        Self::new(config)
+        })
     }
 
-    /// DeepFilterNet3 with auto-discovered models.
     #[cfg(feature = "deepfilternet")]
     pub fn with_deepfilternet_auto() -> Result<Self> {
         let model_dir = crate::utils::find_model_dir().ok_or_else(|| {
             Error::Engine(
                 "DeepFilterNet3 models not found. Place enc.onnx, erb_dec.onnx, df_dec.onnx \
-                 in ./models or set NOISE_CANCEL_MODEL_DIR. RNNoise needs no models: \
-                 Denoiser::with_defaults()."
+                 in ./models or set NOISE_CANCEL_MODEL_DIR."
                     .into(),
             )
         })?;
         Self::with_deepfilternet(model_dir)
     }
 
-    /// Process mono f32 samples at the configured host sample rate.
-    ///
-    /// `input` and `output` must have equal length. When `sample_rate != 48000`,
-    /// audio is resampled to 48 kHz for the engine and back.
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) -> Result<()> {
         if input.len() != output.len() {
             return Err(Error::InvalidConfig(
@@ -190,9 +183,18 @@ impl Denoiser {
         if input.is_empty() {
             return Ok(());
         }
+        if input.len() > 48_000 * 30 {
+            return Err(Error::InvalidConfig(
+                "block too large (max 30s at 48 kHz host samples)".into(),
+            ));
+        }
 
         if self.up.is_none() {
-            return self.process_native(input, output);
+            let r = self.process_native(input, output);
+            if r.is_ok() {
+                sanitize_slice(output);
+            }
+            return r;
         }
 
         let up = self.up.as_mut().unwrap();
@@ -233,6 +235,7 @@ impl Denoiser {
             self.wet_buf = wet_host;
         }
 
+        sanitize_slice(output);
         Ok(())
     }
 
@@ -240,9 +243,7 @@ impl Denoiser {
         if self.wet_buf.len() < input.len() {
             self.wet_buf.resize(input.len(), 0.0);
         }
-
         self.engine.process(input, &mut self.wet_buf[..input.len()])?;
-
         let strength = self.config.strength.clamp().0;
         if self.config.wet_dry_mix && strength < 1.0 {
             for i in 0..input.len() {
@@ -270,7 +271,6 @@ impl Denoiser {
         self.engine.name()
     }
 
-    /// Approximate algorithmic latency in samples at the **host** sample rate.
     pub fn latency_samples(&self) -> usize {
         let eng = self.engine.latency_samples();
         if self.config.sample_rate == SAMPLE_RATE {
@@ -288,12 +288,10 @@ impl Denoiser {
         self.config.strength
     }
 
-    /// Host sample rate this instance was configured for.
     pub fn sample_rate(&self) -> u32 {
         self.config.sample_rate
     }
 
-    /// Preferred host-rate frame size (~10 ms).
     pub fn preferred_frame_size(&self) -> usize {
         let num = FRAME_SIZE as u64 * self.config.sample_rate as u64;
         ((num + SAMPLE_RATE as u64 / 2) / SAMPLE_RATE as u64) as usize
