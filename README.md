@@ -146,10 +146,10 @@ Resolution order for `with_deepfilternet_auto`: `NOISE_CANCEL_MODEL_DIR` → `./
 Use an aligned clean reference WAV and a noisy version of that same speech to compare both engines on the exact same input. Inputs must be mono (or the first channel is used), 48 kHz, and exactly the same number of samples.
 
 ```bash
-cargo run --release --features cli --example quality_benchmark -- clean.wav noisy.wav [model_dir]
+cargo run --release --features cli --example quality_benchmark -- clean.wav noisy.wav [model_dir] [output_dir]
 ```
 
-The benchmark reports input SNR and each engine's output SNR plus the change relative to the noisy input. These are measurements for that specific pair, not a universal quality claim; listen for artifacts and speech distortion as well. Do not compare files that differ in alignment, timing, or sample rate.
+The benchmark reports input SNR and each engine's output SNR plus the change relative to the noisy input. These are measurements for that specific pair, not a universal quality claim; listen for artifacts and speech distortion as well. Do not compare files that differ in alignment, timing, or sample rate. If an output directory is supplied, it writes `rnnoise.wav` and `deepfilternet.wav` there for direct listening comparison, and refuses to overwrite either existing file.
 
 ## CLI
 
