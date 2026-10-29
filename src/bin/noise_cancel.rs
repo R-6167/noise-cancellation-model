@@ -206,11 +206,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    if args.remember_engine {
-        save_engine_preference(&selected_engine)?;
-        println!("Saved preferred engine: {selected_engine}");
-    }
-
     let config = DenoiserConfig {
         engine,
         strength: Strength(args.strength),
@@ -219,6 +214,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut denoiser = Denoiser::new(config)?;
+    if args.remember_engine {
+        save_engine_preference(&selected_engine)?;
+        println!("Saved preferred engine: {selected_engine}");
+    }
     println!("Using engine: {}", denoiser.engine_name());
 
     let block_size = (spec.sample_rate as usize / 2).max(1);
