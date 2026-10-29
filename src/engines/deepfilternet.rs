@@ -273,6 +273,29 @@ impl DfHistory {
     }
 }
 
+fn model_pipeline_ready(combined: bool, encoder: bool, erb_decoder: bool, df_decoder: bool) -> bool {
+    combined || (encoder && erb_decoder && df_decoder)
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::model_pipeline_ready;
+
+    #[test]
+    fn combined_model_is_a_complete_pipeline() {
+        assert!(model_pipeline_ready(true, false, false, false));
+    }
+
+    #[test]
+    fn split_model_requires_encoder_and_both_decoders() {
+        assert!(model_pipeline_ready(false, true, true, true));
+        assert!(!model_pipeline_ready(false, true, false, true));
+        assert!(!model_pipeline_ready(false, true, true, false));
+        assert!(!model_pipeline_ready(false, true, false, false));
+        assert!(!model_pipeline_ready(false, false, true, true));
+    }
+}
+
 struct OnnxModels {
     ready: bool,
     combined: Option<ort::session::Session>,
@@ -350,7 +373,7 @@ impl OnnxModels {
         }
 
         Ok(Self {
-            ready: combined.is_some() || (enc.is_some() && erb_dec.is_some() && df_dec.is_some()),
+            ready: model_pipeline_ready(combined.is_some(), enc.is_some(), erb_dec.is_some(), df_dec.is_some()),
             combined,
             enc,
             erb_dec,
