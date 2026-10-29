@@ -1,6 +1,6 @@
-# DeepFilterNet3 models
+# DeepFilterNet3 models (vendored)
 
-## Required files (official export)
+These official ONNX graphs ship with the repository. **No download is required.**
 
 | File | Size | Role |
 |------|------|------|
@@ -9,29 +9,16 @@
 | `df_dec.onnx` | ~3.2 MB | Deep-filter coefficient decoder |
 | `config.ini` | ~2 KB | DSP hyperparameters |
 
-**RNNoise needs none of these** — its weights are embedded in the binary.
+## Usage
 
-## Vendor into this repo (one-time)
-
-From the repository root:
-
-```bash
-bash scripts/vendor_models.sh
-git add models/*.onnx models/config.ini
-git commit -m "Vendor DeepFilterNet3 ONNX models"
-git push
+```rust
+// Auto-discovers ./models (or NOISE_CANCEL_MODEL_DIR / crate models / <exe>/models)
+let mut den = Denoiser::with_deepfilternet_auto()?;
 ```
 
-Or download the official archive and extract:
+**RNNoise** (default engine) does not use these files — its weights are embedded in the binary.
 
-```bash
-curl -sL https://github.com/Rikorose/DeepFilterNet/raw/main/models/DeepFilterNet3_onnx.tar.gz | tar -xz
-cp tmp/export/*.onnx models/
-cp tmp/export/config.ini models/
-```
+## Source
 
-After the three `.onnx` files are present under `models/`, `Denoiser::with_deepfilternet_auto()` works fully offline.
-
-## License
-
-Upstream DeepFilterNet3: MIT OR Apache-2.0 (Rikorose/DeepFilterNet).
+Upstream: [Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) — `DeepFilterNet3_onnx.tar.gz`  
+License: MIT OR Apache-2.0

@@ -30,7 +30,7 @@ jobs:
         run: cargo test --release --features rnnoise
 
   deepfilternet:
-    name: DeepFilterNet3
+    name: DeepFilterNet3 (vendored models)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,21 +38,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: Cache DFN3 models
-        id: cache-models
-        uses: actions/cache@v4
-        with:
-          path: models
-          key: dfn3-onnx-v1
-      - name: Fetch DFN3 ONNX (CI only – library never downloads)
-        if: steps.cache-models.outputs.cache-hit != 'true'
+      - name: Verify vendored models
         run: |
-          mkdir -p models
-          curl -sL "https://github.com/Rikorose/DeepFilterNet/raw/main/models/DeepFilterNet3_onnx.tar.gz" -o /tmp/dfn3.tar.gz
-          tar -xzf /tmp/dfn3.tar.gz -C /tmp
-          find /tmp -name 'enc.onnx' -exec cp {} models/ \;
-          find /tmp -name 'erb_dec.onnx' -exec cp {} models/ \;
-          find /tmp -name 'df_dec.onnx' -exec cp {} models/ \;
+          test -f models/enc.onnx
+          test -f models/erb_dec.onnx
+          test -f models/df_dec.onnx
           ls -lh models/
       - name: Build deepfilternet + cli
         run: cargo build --release --features "cli,deepfilternet"
