@@ -398,23 +398,28 @@ pub unsafe extern "C" fn nc_process_interleaved(
     }
     let h = unsafe { &mut *handle };
     let ch = h.multi.channels();
-    let n = frames.saturating_mul(ch);
+    let n = match frames.checked_mul(ch) {
+        Some(value) => value,
+        None => return NcStatus::ErrInvalidArg as i32,
+    };
     if n == 0 {
         return NcStatus::Ok as i32;
     }
-    let in_slice = unsafe { std::slice::from_raw_parts(input, n) };
-    let out_slice = unsafe { std::slice::from_raw_parts_mut(output, n) };
+    let overlaps = match ranges_overlap(input, output, n) {
+        Some(value) => value,
+        None => return NcStatus::ErrInvalidArg as i32,
+    };
 
-    if std::ptr::eq(input, output as *const f32) {
-        let mut tmp = in_slice.to_vec();
-        match h.multi.process_interleaved(in_slice, &mut tmp, frames) {
-            Ok(()) => {
-                out_slice.copy_from_slice(&tmp);
-                NcStatus::Ok as i32
-            }
+    if overlaps {
+        let input_copy = unsafe { std::slice::from_raw_parts(input, n) }.to_vec();
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(output, n) };
+        match h.multi.process_interleaved(&input_copy, out_slice, frames) {
+            Ok(()) => NcStatus::Ok as i32,
             Err(e) => map_err(e) as i32,
         }
     } else {
+        let in_slice = unsafe { std::slice::from_raw_parts(input, n) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(output, n) };
         match h.multi.process_interleaved(in_slice, out_slice, frames) {
             Ok(()) => NcStatus::Ok as i32,
             Err(e) => map_err(e) as i32,
