@@ -497,6 +497,9 @@ pub unsafe extern "C" fn nc_multi_set_strength(handle: *mut NcMultiHandle, stren
     if handle.is_null() {
         return NcStatus::ErrNullPointer as i32;
     }
+    if !strength.is_finite() {
+        return NcStatus::ErrInvalidArg as i32;
+    }
     unsafe { (*handle).multi.set_strength(Strength(strength)) };
     NcStatus::Ok as i32
 }
@@ -604,6 +607,24 @@ mod overlap_tests {
             NcStatus::ErrInvalidArg as i32
         );
         unsafe { nc_destroy_multi(multi) };
+    }
+
+    #[test]
+    fn multi_strength_setter_rejects_non_finite_values() {
+        let mut handle: *mut NcMultiHandle = ptr::null_mut();
+        assert_eq!(
+            unsafe { nc_create_multi(NcEngine::Rnnoise as i32, ptr::null(), 0.85, 2, &mut handle) },
+            NcStatus::Ok as i32
+        );
+        assert_eq!(
+            unsafe { nc_multi_set_strength(handle, f32::INFINITY) },
+            NcStatus::ErrInvalidArg as i32
+        );
+        assert_eq!(
+            unsafe { nc_multi_set_strength(handle, 0.5) },
+            NcStatus::Ok as i32
+        );
+        unsafe { nc_destroy_multi(handle) };
     }
 
 }
