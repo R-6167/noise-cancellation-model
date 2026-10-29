@@ -372,8 +372,16 @@ impl OnnxModels {
             }
         }
 
+        let ready = model_pipeline_ready(combined.is_some(), enc.is_some(), erb_dec.is_some(), df_dec.is_some());
+        if !ready {
+            return Err(Error::Engine(format!(
+                "DeepFilterNet3 model files were found in {} but no complete ONNX inference pipeline could be loaded",
+                model_dir.display()
+            )));
+        }
+
         Ok(Self {
-            ready: model_pipeline_ready(combined.is_some(), enc.is_some(), erb_dec.is_some(), df_dec.is_some()),
+            ready,
             combined,
             enc,
             erb_dec,
@@ -397,6 +405,9 @@ pub struct DeepFilterNetEngine {
     flushing: bool,
     flush_remaining: usize,
     strength: f32,
+    inference_frames: u64,
+    fallback_frames: u64,
+    fallback_warning_emitted: bool,
     power: [f32; N_FREQS],
     erb_feat: [f32; NB_ERB],
     spec_re: [f32; NB_DF],
@@ -428,6 +439,9 @@ impl DeepFilterNetEngine {
             flushing: false,
             flush_remaining: 0,
             strength: 0.85,
+            inference_frames: 0,
+            fallback_frames: 0,
+            fallback_warning_emitted: false,
             power: [0.0; N_FREQS],
             erb_feat: [0.0; NB_ERB],
             spec_re: [0.0; NB_DF],
@@ -452,6 +466,16 @@ impl DeepFilterNetEngine {
         &self.onnx.loaded_paths
     }
 
+    /// Number of STFT frames for which neural inference succeeded.
+    pub fn neural_inference_frames(&self) -> u64 {
+        self.inference_frames
+    }
+
+    /// Number of STFT frames that fell back to unity spectral gains.
+    pub fn neural_fallback_frames(&self) -> u64 {
+        self.fallback_frames
+    }
+
     fn enhance_spectrum(&mut self, spectrum: &mut [Complex<f32>]) {
         let strength = self.strength;
         for k in 0..N_FREQS.min(spectrum.len()) {
@@ -472,8 +496,16 @@ impl DeepFilterNetEngine {
         self.df_coefs.clear();
         let neural_ok = self.run_neural();
         if neural_ok {
+            self.inference_frames = self.inference_frames.saturating_add(1);
             self.lin_gain = self.erb.synthesize_mask(&self.mask);
         } else {
+            self.fallback_frames = self.fallback_frames.saturating_add(1);
+            if !self.fallback_warning_emitted {
+                log::warn!(
+                    "DeepFilterNet3 neural inference failed; using unity spectral gains for fallback frames (inference continues, inspect model compatibility/logs)"
+                );
+                self.fallback_warning_emitted = true;
+            }
             self.lin_gain = [1.0; N_FREQS];
         }
         if let Some(lim_db) = self.config.atten_lim_db {
