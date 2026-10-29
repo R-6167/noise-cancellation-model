@@ -1,10 +1,10 @@
 //! RNNoise engine via the pure-Rust `nnnoiseless` crate.
 //! Extremely lightweight, excellent for real-time and low-power devices.
 
-use nnnoiseless::DenoiseState;
 use crate::engines::NoiseEngine;
 use crate::utils::AudioBufferPool;
 use crate::{Error, Result, FRAME_SIZE};
+use nnnoiseless::DenoiseState;
 
 /// RNNoise-based suppressor.
 pub struct RnnoiseEngine {
@@ -42,7 +42,9 @@ impl NoiseEngine for RnnoiseEngine {
             ));
         }
 
-        let mut work = self.pool.acquire(self.remainder.len() + input.len() + FRAME_SIZE);
+        let mut work = self
+            .pool
+            .acquire(self.remainder.len() + input.len() + FRAME_SIZE);
         work.extend_from_slice(&self.remainder);
         work.extend_from_slice(input);
         self.remainder.clear();
@@ -55,7 +57,8 @@ impl NoiseEngine for RnnoiseEngine {
                 self.frame_in[i] = work[in_pos + i] * 32768.0;
             }
 
-            self.state.process_frame(&mut self.frame_out, &self.frame_in);
+            self.state
+                .process_frame(&mut self.frame_out, &self.frame_in);
 
             for i in 0..FRAME_SIZE {
                 if out_pos < output.len() {
