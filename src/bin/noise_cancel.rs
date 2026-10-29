@@ -3,7 +3,7 @@
 use clap::Parser;
 use hound::{SampleFormat, WavReader, WavWriter};
 use noise_cancellation::{Denoiser, DenoiserConfig, EngineKind, Strength};
-use std::path::PathBuf;
+use std::{env, fs, path::PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -25,13 +25,63 @@ struct Args {
     #[arg(long)]
     full: bool,
 
-    /// Engine to use: "rnnoise" (default) or "deepfilternet"
-    #[arg(long, default_value = "rnnoise")]
-    engine: String,
+    /// Engine to use: "rnnoise" or "deepfilternet" (overrides the saved preference)
+    #[arg(long)]
+    engine: Option<String>,
+
+    /// Save the selected engine as the default for future runs
+    #[arg(long)]
+    remember_engine: bool,
 
     /// Path to DeepFilterNet3 model directory (required when --engine deepfilternet)
     #[arg(long)]
     model_dir: Option<PathBuf>,
+}
+
+fn engine_preference_path() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env::var_os("APPDATA").map(PathBuf::from).map(|path| {
+            path.join("noise-cancellation-model").join("engine")
+        })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        env::var_os("HOME").map(PathBuf::from).map(|path| {
+            path.join("Library")
+                .join("Application Support")
+                .join("noise-cancellation-model")
+                .join("engine")
+        })
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .map(|path| path.join("noise-cancellation-model").join("engine"))
+    }
+}
+
+fn load_engine_preference() -> Option<String> {
+    let preference = fs::read_to_string(engine_preference_path()?).ok()?;
+    let engine = preference.trim();
+    if engine.is_empty() {
+        None
+    } else {
+        Some(engine.to_owned())
+    }
+}
+
+fn save_engine_preference(engine: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = engine_preference_path()
+        .ok_or("could not determine the user config directory for engine preference")?;
+    let parent = path
+        .parent()
+        .ok_or("engine preference path has no parent directory")?;
+    fs::create_dir_all(parent)?;
+    fs::write(path, format!("{engine}\n"))?;
+    Ok(())
 }
 
 fn first_channel(samples: Vec<f32>, channels: usize) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -116,7 +166,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let engine = match args.engine.as_str() {
+    let selected_engine = args
+        .engine
+        .clone()
+        .or_else(load_engine_preference)
+        .unwrap_or_else(|| "rnnoise".to_owned());
+
+    let engine = match selected_engine.as_str() {
         "rnnoise" => {
             #[cfg(feature = "rnnoise")]
             {
@@ -149,6 +205,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     };
+
+    if args.remember_engine {
+        save_engine_preference(&selected_engine)?;
+        println!("Saved preferred engine: {selected_engine}");
+    }
 
     let config = DenoiserConfig {
         engine,
