@@ -130,6 +130,13 @@ jobs:
                   out.write(f"{index:02d}\t{clean[name]}\t{noisy[name]}\n")
           PY
 
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          ffmpeg -version
+          ffprobe -version
+
       - name: Convert matched clips to aligned mono 48 kHz WAVs
         run: |
           set -euo pipefail
