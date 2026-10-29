@@ -124,36 +124,79 @@ fn snr_db(clean: &[f32], estimate: &[f32]) -> Option<f64> {
     Some(10.0 * (signal_power / error_power).log10())
 }
 
-/// Find the best SNR over a bounded relative offset. Positive lag means the estimate
+/// Return the overlapping regions for a lag. Positive lag means the estimate
 /// starts later than the clean reference; negative lag means it starts earlier.
-/// This is a diagnostic only: callers should always report the zero-lag score too.
+fn overlap_for_lag<'a>(clean: &'a [f32], estimate: &'a [f32], lag: isize) -> (&'a [f32], &'a [f32]) {
+    if lag >= 0 {
+        let offset = lag as usize;
+        let length = clean.len().min(estimate.len().saturating_sub(offset));
+        (&clean[..length], &estimate[offset..offset + length])
+    } else {
+        let offset = (-lag) as usize;
+        let length = clean.len().saturating_sub(offset).min(estimate.len());
+        (&clean[offset..offset + length], &estimate[..length])
+    }
+}
+
+/// Find the best SNR over a bounded relative offset using coarse-to-fine
+/// normalized-correlation search. This is diagnostic only; zero-lag SNR remains
+/// the primary metric. The coarse search keeps runtime practical for long clips.
 fn best_lag_snr_db(clean: &[f32], estimate: &[f32], max_lag: usize) -> Option<(f64, isize)> {
-    if clean.is_empty() || estimate.is_empty() {
+    if clean.len() < 2 || estimate.len() < 2 {
         return None;
     }
-    let bound = max_lag.min(clean.len().saturating_sub(1)).min(estimate.len().saturating_sub(1));
-    let mut best: Option<(f64, isize)> = None;
-    for lag in -(bound as isize)..=(bound as isize) {
-        let (clean_start, estimate_start, length) = if lag >= 0 {
-            let offset = lag as usize;
-            (0, offset, clean.len().min(estimate.len().saturating_sub(offset)))
-        } else {
-            let offset = (-lag) as usize;
-            (offset, 0, clean.len().saturating_sub(offset).min(estimate.len()))
-        };
-        if length < 2 {
-            continue;
+    let bound = max_lag
+        .min(clean.len().saturating_sub(1))
+        .min(estimate.len().saturating_sub(1)) as isize;
+    let correlation = |lag: isize| -> f64 {
+        let (reference, actual) = overlap_for_lag(clean, estimate, lag);
+        let mut dot = 0.0f64;
+        let mut reference_power = 0.0f64;
+        let mut actual_power = 0.0f64;
+        let stride = (reference.len() / 4096).max(1);
+        for i in (0..reference.len()).step_by(stride) {
+            let a = reference[i] as f64;
+            let b = actual[i] as f64;
+            dot += a * b;
+            reference_power += a * a;
+            actual_power += b * b;
         }
-        if let Some(score) = snr_db(
-            &clean[clean_start..clean_start + length],
-            &estimate[estimate_start..estimate_start + length],
-        ) {
-            if best.map_or(true, |(best_score, _)| score > best_score) {
-                best = Some((score, lag));
-            }
+        let denominator = (reference_power * actual_power).sqrt();
+        if denominator <= 1e-20 { -1.0 } else { dot / denominator }
+    };
+
+    // For short clips, scan every lag exactly; use a coarser grid only for long clips.
+    let coarse_step = if bound <= 48 { 1 } else { 48 };
+    let mut best_lag = 0isize;
+    let mut best_correlation = f64::NEG_INFINITY;
+    let mut lag = -bound;
+    while lag <= bound {
+        let score = correlation(lag);
+        if score > best_correlation {
+            best_correlation = score;
+            best_lag = lag;
+        }
+        lag += coarse_step;
+    }
+    // Always include the positive boundary in case the coarse step does not land on it.
+    for candidate in [-bound, bound] {
+        let score = correlation(candidate);
+        if score > best_correlation {
+            best_correlation = score;
+            best_lag = candidate;
         }
     }
-    best
+    let refine_start = (best_lag - coarse_step).max(-bound);
+    let refine_end = (best_lag + coarse_step).min(bound);
+    for candidate in refine_start..=refine_end {
+        let score = correlation(candidate);
+        if score > best_correlation {
+            best_correlation = score;
+            best_lag = candidate;
+        }
+    }
+    let (reference, actual) = overlap_for_lag(clean, estimate, best_lag);
+    snr_db(reference, actual).map(|score| (score, best_lag))
 }
 
 fn print_snr_diagnostics(label: &str, clean: &[f32], estimate: &[f32], input_snr: f64) -> Result<(), Box<dyn Error>> {
