@@ -91,9 +91,9 @@ impl MultiDenoiser {
         frames: usize,
     ) -> Result<()> {
         let ch = self.chans.len();
-        let need = frames.checked_mul(ch).ok_or_else(|| {
-            Error::InvalidConfig("frames * channels overflow".into())
-        })?;
+        let need = frames
+            .checked_mul(ch)
+            .ok_or_else(|| Error::InvalidConfig("frames * channels overflow".into()))?;
         if input.len() < need || output.len() < need {
             return Err(Error::InvalidConfig(format!(
                 "buffer too small: need {need}, got in={} out={}",
