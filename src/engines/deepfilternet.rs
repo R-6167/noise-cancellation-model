@@ -719,6 +719,7 @@ impl NoiseEngine for DeepFilterNetEngine {
             let fallback_before = self.fallback_frames;
             self.enhance_spectrum(&mut spectrum);
             if self.fallback_frames > fallback_before {
+                self.stft.spectrum = spectrum;
                 return Err(Error::Engine(format!(
                     "DeepFilterNet3 inference failed at stream frame {}; refusing to emit unenhanced audio",
                     self.inference_frames.saturating_add(self.fallback_frames)
@@ -753,6 +754,7 @@ impl NoiseEngine for DeepFilterNetEngine {
                 let fallback_before = self.fallback_frames;
                 self.enhance_spectrum(&mut spectrum);
                 if self.fallback_frames > fallback_before {
+                    self.stft.spectrum = spectrum;
                     return Err(Error::Engine(
                         "DeepFilterNet3 inference failed while flushing; refusing to emit unenhanced audio".into()
                     ));
