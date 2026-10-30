@@ -716,7 +716,14 @@ impl NoiseEngine for DeepFilterNetEngine {
             let hop = &work[in_pos..in_pos + HOP_SIZE];
             self.stft.analyze_hop(hop);
             let mut spectrum = std::mem::take(&mut self.stft.spectrum);
+            let fallback_before = self.fallback_frames;
             self.enhance_spectrum(&mut spectrum);
+            if self.fallback_frames > fallback_before {
+                return Err(Error::Engine(format!(
+                    "DeepFilterNet3 inference failed at stream frame {}; refusing to emit unenhanced audio",
+                    self.inference_frames.saturating_add(self.fallback_frames)
+                )));
+            }
             self.stft.spectrum = spectrum;
             let enhanced = self.stft.synthesize_hop();
             self.output_queue.extend(enhanced);
@@ -743,7 +750,13 @@ impl NoiseEngine for DeepFilterNetEngine {
                 final_hop[..self.remainder.len()].copy_from_slice(&self.remainder);
                 self.stft.analyze_hop(&final_hop);
                 let mut spectrum = std::mem::take(&mut self.stft.spectrum);
+                let fallback_before = self.fallback_frames;
                 self.enhance_spectrum(&mut spectrum);
+                if self.fallback_frames > fallback_before {
+                    return Err(Error::Engine(
+                        "DeepFilterNet3 inference failed while flushing; refusing to emit unenhanced audio".into()
+                    ));
+                }
                 self.stft.spectrum = spectrum;
                 let enhanced = self.stft.synthesize_hop();
                 self.output_queue.extend(enhanced);
@@ -768,6 +781,9 @@ impl NoiseEngine for DeepFilterNetEngine {
         self.output_queue.extend(std::iter::repeat_n(0.0, latency));
         self.flushing = false;
         self.flush_remaining = 0;
+        self.inference_frames = 0;
+        self.fallback_frames = 0;
+        self.fallback_warning_emitted = false;
         self.stft.reset();
         self.erb_norm.reset();
         self.spec_norm.reset();
